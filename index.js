@@ -304,6 +304,7 @@ class EnerTalkPlatform {
 
   async _startLocal() {
     if (!this.enabled) return;
+    this._localStartMs = Date.now();
 
     // 0) 저장소 + 당월 사용량 로컬 산출기(기기 누적 카운터 기반, 클라우드로 보정)
     this._storageDir = '.';
@@ -441,17 +442,34 @@ class EnerTalkPlatform {
       fallbackSinceMs: 0,    // 이번 폴백 시작 시각
       lastCounter_mWh: null, // 기기 누적 에너지 카운터(당월 로컬 산출용)
       charge: null,          // 클라우드에서 받은 당월 요금(원)
+      lastCloudBilling: null,// 최근 클라우드 billing {usage, start} (기준선 보정용)
+      calibrated: false,     // 이번 세션에서 클라우드로 기준선 보정했는지
+      lastHistoryMs: 0,      // fakegato 히스토리 마지막 기록 시각(throttle)
     };
   }
 
-  /** 당월 사용량(kWh)을 로컬 산출값으로 갱신. 요금(원)은 있으면 로그에 함께. */
+  /** 당월 사용량(kWh)을 로컬 산출값으로 갱신. 기준선이 없으면 클라우드로 seed, 없으면 대기/근사. */
   _updateMonthlyUsage(logInfo) {
     const ctx = this.localCtx;
-    if (!ctx || !ctx.usageLux) return;
-    let kwh = null;
-    if (ctx.lastCounter_mWh != null && this.monthly) {
-      kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, Date.now());
+    if (!ctx || !ctx.usageLux || ctx.lastCounter_mWh == null || !this.monthly) return;
+    const now = Date.now();
+
+    // 기준선 확보 전략(잘못된 0 방지)
+    if (!this.monthly.hasBaseline()) {
+      if (ctx.lastCloudBilling) {
+        // 클라우드 값으로 정확히 seed (baseline = counter - 당월usage)
+        this.monthly.learnFromCloud(ctx.lastCounter_mWh, ctx.lastCloudBilling.usage, ctx.lastCloudBilling.start, now);
+        ctx.calibrated = true;
+      } else if (!this.client || (now - (this._localStartMs || now) > 60000)) {
+        // 순수 로컬(클라우드 없음) 또는 클라우드 60초 무응답 → 현재 카운터로 근사 seed
+        this.monthly.seedBaselineIfEmpty(ctx.lastCounter_mWh, now);
+      } else {
+        // 클라우드 응답 대기중 → 표시 보류(billing 이 임시로 클라우드값 표시)
+        return;
+      }
     }
+
+    const kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, now);
     if (kwh == null) return;
     ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
     ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
@@ -469,8 +487,13 @@ class EnerTalkPlatform {
     ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
     ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
     ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+    // fakegato 히스토리는 ~30초 간격으로만 기록(기기가 초당 푸시 → 매초 기록은 낭비).
     if (ctx.history) {
-      try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
+      const now = Date.now();
+      if (now - (ctx.lastHistoryMs || 0) >= 30000) {
+        ctx.lastHistoryMs = now;
+        try { ctx.history.addEntry({ time: Math.round(now / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
+      }
     }
   }
 
@@ -488,6 +511,11 @@ class EnerTalkPlatform {
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(클라우드 없이도 동작).
     if (r.energy_mWh != null) {
       ctx.lastCounter_mWh = r.energy_mWh;
+      // 세션당 1회: 카운터+클라우드 billing 둘 다 확보되면 정확히 재보정(오래된 기준선 치유).
+      if (this.client && !ctx.calibrated && ctx.lastCloudBilling && this.monthly) {
+        this.monthly.learnFromCloud(r.energy_mWh, ctx.lastCloudBilling.usage, ctx.lastCloudBilling.start, Date.now());
+        ctx.calibrated = true;
+      }
       this._updateMonthlyUsage(false);
     }
 
@@ -536,21 +564,26 @@ class EnerTalkPlatform {
     if (!ctx || !ctx.usageLux || !this._billingSiteId || !this.client) return;
     const data = await this.client.getBilling(this._billingSiteId);
 
-    // 클라우드로 검침일 + 기준선 보정(정확도 유지). 요금(원)도 갱신.
-    if (this.monthly) {
-      this.monthly.learnFromCloud(ctx.lastCounter_mWh, data.usage, data.start, Date.now());
-    }
+    // 최근 클라우드 billing 보관(기준선 seed/보정용) + 요금(원)
+    ctx.lastCloudBilling = { usage: data.usage, start: data.start };
     ctx.charge = (data && data.bill && data.bill.charge != null) ? data.bill.charge : null;
 
-    // 표시는 항상 로컬 산출값(클라우드 없어도 동일하게 동작). 카운터 미확보 시 클라우드값으로 임시 표시.
-    let kwh = (ctx.lastCounter_mWh != null && this.monthly)
-      ? this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, Date.now())
-      : EnerTalkApi.toKwh(data.usage);
+    // 카운터가 있으면 매 폴링마다 검침일+기준선 정확 보정(권위값).
+    if (this.monthly && ctx.lastCounter_mWh != null) {
+      this.monthly.learnFromCloud(ctx.lastCounter_mWh, data.usage, data.start, Date.now());
+      ctx.calibrated = true;
+    }
+
+    // 표시: 카운터+기준선 있으면 로컬 산출(클라우드 없어도 동일), 아직이면 클라우드값 임시.
+    let kwh = null;
+    if (this.monthly && ctx.lastCounter_mWh != null) kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, Date.now());
+    const localOk = kwh != null;
+    if (!localOk) kwh = EnerTalkApi.toKwh(data.usage);
     ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
     ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
 
     const charge = ctx.charge != null ? `${ctx.charge}원` : 'n/a';
-    const src = ctx.lastCounter_mWh != null ? '로컬 산출·클라우드 보정' : '클라우드';
+    const src = localOk ? '로컬 산출·클라우드 보정' : '클라우드(기기 카운터 대기)';
     const msg = `[EnerTalk][local] 당월 ${round(kwh, 2)}kWh / ${charge} (${src})`;
     if (!ctx.loggedBilling) { this.log.info(`${msg} — 정상`); ctx.loggedBilling = true; }
     else { this.log.debug(msg); }
