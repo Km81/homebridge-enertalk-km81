@@ -16,6 +16,7 @@
 
 const packageJson = require('./package.json');
 const EnerTalkApi = require('./lib/EnerTalkApi.js');
+const LocalServer = require('./lib/LocalServer.js');
 const buildEveCharacteristics = require('./lib/EveCharacteristics.js');
 
 const PLUGIN_NAME = packageJson.name;      // homebridge-enertalk-km81
@@ -52,11 +53,12 @@ class EnerTalkPlatform {
     this.exposeUsage = this.config.exposeUsage !== false;
     this.exposeOutlet = this.config.exposeOutlet === true;
 
-    if (!this.config.email || !this.config.password) {
-      this.log.error('[EnerTalk] config 에 email/password 가 없습니다. 플러그인을 시작하지 않습니다.');
-      this.enabled = false;
-    } else {
-      this.enabled = true;
+    // 로컬 모드: 기기를 클라우드 대신 이 호스트로 직접 받음(DNS 리다이렉트 필요).
+    this.localMode = this.config.localMode === true;
+    this.localPort = Number(this.config.localPort) || LocalServer.DEFAULT_PORT;
+
+    const hasCloud = !!(this.config.email && this.config.password);
+    if (hasCloud) {
       this.client = new EnerTalkApi({
         email: this.config.email,
         password: this.config.password,
@@ -66,11 +68,23 @@ class EnerTalkPlatform {
       });
     }
 
+    // 로컬 모드면 클라우드 자격증명 없이도 동작. 아니면 email/password 필수.
+    if (this.localMode || hasCloud) {
+      this.enabled = true;
+    } else {
+      this.log.error('[EnerTalk] config 에 email/password 가 없습니다(로컬 모드도 꺼짐). 플러그인을 시작하지 않습니다.');
+      this.enabled = false;
+    }
+
     if (this.api) {
-      this.api.on('didFinishLaunching', () => this._start().catch((e) => {
-        this.log.error('[EnerTalk] 시작 실패:', e && e.message ? e.message : e);
-      }));
-      this.api.on('shutdown', () => this._stopAllTimers());
+      this.api.on('didFinishLaunching', () => {
+        const boot = this.localMode ? this._startLocal() : this._start();
+        boot.catch((e) => this.log.error('[EnerTalk] 시작 실패:', e && e.message ? e.message : e));
+      });
+      this.api.on('shutdown', () => {
+        this._stopAllTimers();
+        if (this.localServer) { try { this.localServer.stop(); } catch (e) { /* 무시 */ } }
+      });
     }
   }
 
@@ -283,6 +297,157 @@ class EnerTalkPlatform {
     else { this.log.debug(msg); }
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  //  로컬 모드: 기기를 클라우드 대신 이 호스트로 직접 받아 디코딩
+  // ══════════════════════════════════════════════════════════════════════
+
+  async _startLocal() {
+    if (!this.enabled) return;
+
+    // 1) 로컬 액세서리 준비(기기 접속 전에도 미리 등록해 둠)
+    this._setupLocalAccessories();
+
+    // 2) 당월 사용량/요금은 클라우드 billing 이 살아있으면 병행(정확한 '당월' 값).
+    //    클라우드가 죽으면 기기 누적 카운터로 대체.
+    this._billingSiteId = null;
+    if (this.client) {
+      try {
+        const sites = await this.client.getSites();
+        if (Array.isArray(sites) && sites.length && sites[0].id) {
+          this._billingSiteId = sites[0].id;
+          this.log.info(`[EnerTalk][local] 당월 사용량은 클라우드 billing 병행 (site ${this._billingSiteId})`);
+          const poll = () => this._pollLocalBilling().catch((e) =>
+            this.log.warn('[EnerTalk][local] billing 오류:', e.message));
+          poll();
+          this.localCtx.timers.push(setInterval(poll, this.billingInterval * 1000));
+        }
+      } catch (e) {
+        this.log.warn('[EnerTalk][local] 클라우드 billing 사용 불가 — 기기 누적 카운터로 대체:', e.message);
+      }
+    } else {
+      this.log.info('[EnerTalk][local] 클라우드 자격증명 없음 — 당월 사용량은 기기 누적 카운터 사용.');
+    }
+
+    // 3) TLS 서버 시작
+    this.localServer = new LocalServer({ port: this.localPort, log: this.log });
+    this.localServer.on('reading', (r) => {
+      try { this._onLocalReading(r); } catch (e) { this.log.debug('[EnerTalk][local] reading 처리 오류:', e.message); }
+    });
+    try {
+      this.localServer.start();
+    } catch (e) {
+      this.log.error('[EnerTalk][local] TLS 서버 시작 실패:', e && e.message);
+    }
+  }
+
+  _setupLocalAccessories() {
+    const { Service, Characteristic } = this.hap;
+    const uuidGen = this.api.hap.uuid.generate;
+    const powerName = this.config.powerSensorName || '실시간 전력';
+    const usageName = this.config.usageSensorName || '당월 사용량';
+
+    const seen = new Set();
+    const toRegister = [];
+    let powerLux = null;
+    let usageLux = null;
+    let history = null;
+
+    if (this.exposePower) {
+      const pUuid = uuidGen(`${PLUGIN_NAME}:local:power`);
+      seen.add(pUuid);
+      const pAcc = this._ensureAccessory(pUuid, powerName, toRegister);
+      pAcc.context.siteId = 'local';
+      this._setInfo(pAcc, { id: 'local' }, 'EnerTalk 실시간 전력(W) · 로컬');
+      powerLux = pAcc.getService(Service.LightSensor) || pAcc.addService(Service.LightSensor, powerName);
+      powerLux.setCharacteristic(Characteristic.Name, powerName);
+      this._ensureCharacteristic(powerLux, this.Eve.CurrentConsumption);
+      this._ensureCharacteristic(powerLux, this.Eve.Voltage);
+      this._ensureCharacteristic(powerLux, this.Eve.ElectricCurrent);
+      if (this.FakeGato) {
+        try {
+          history = new this.FakeGato('energy', pAcc, { storage: 'fs', path: this.api.user.storagePath() });
+        } catch (e) {
+          this.log.warn('[EnerTalk][local] 히스토리 서비스 생성 실패:', e.message);
+        }
+      }
+    }
+
+    if (this.exposeUsage) {
+      const uUuid = uuidGen(`${PLUGIN_NAME}:local:usage`);
+      seen.add(uUuid);
+      const uAcc = this._ensureAccessory(uUuid, usageName, toRegister);
+      uAcc.context.siteId = 'local';
+      this._setInfo(uAcc, { id: 'local' }, 'EnerTalk 당월/누적 사용량(kWh) · 로컬');
+      usageLux = uAcc.getService(Service.LightSensor) || uAcc.addService(Service.LightSensor, usageName);
+      usageLux.setCharacteristic(Characteristic.Name, usageName);
+      this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
+    }
+
+    if (toRegister.length) {
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toRegister);
+    }
+    // 로컬 모드로 전환 시 예전(클라우드) 액세서리 정리
+    for (const [uuid, acc] of this.accessories) {
+      if (!seen.has(uuid)) {
+        this.log.info('[EnerTalk][local] 사용하지 않는 액세서리 제거:', acc.displayName);
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [acc]);
+        this.accessories.delete(uuid);
+      }
+    }
+
+    this.localCtx = {
+      powerLux, usageLux, history,
+      timers: [],
+      loggedRealtime: false, loggedBilling: false,
+      cloudBilling: false, // billing 이 채워졌는지
+    };
+  }
+
+  _onLocalReading(r) {
+    const ctx = this.localCtx;
+    if (!ctx) return;
+
+    const watts = r.activePower_mW != null ? r.activePower_mW / 1000 : 0;
+    const volts = r.voltage_mV != null ? r.voltage_mV / 1000 : 0;
+    const amps = r.current_mA != null ? r.current_mA / 1000 : 0;
+
+    if (ctx.powerLux) {
+      ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(watts));
+      ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
+      ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
+      ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+    }
+    if (ctx.history) {
+      try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
+    }
+
+    // 클라우드 billing 이 없으면 기기 누적 에너지 카운터로 사용량 표시(누적 kWh).
+    if (ctx.usageLux && !ctx.cloudBilling && r.energy_mWh != null) {
+      const kwh = r.energy_mWh / 1e6;
+      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    }
+
+    const msg = `[EnerTalk][local] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A / ${r.freqHz}Hz (기기 직수신)`;
+    if (!ctx.loggedRealtime) { this.log.info(`${msg} — 로컬 수신 정상 (이후 갱신은 debug 로그)`); ctx.loggedRealtime = true; }
+    else { this.log.debug(msg); }
+  }
+
+  async _pollLocalBilling() {
+    const ctx = this.localCtx;
+    if (!ctx || !ctx.usageLux || !this._billingSiteId || !this.client) return;
+    const data = await this.client.getBilling(this._billingSiteId);
+    const kwh = EnerTalkApi.toKwh(data.usage);
+    ctx.cloudBilling = true;
+    ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+    ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+
+    const charge = data && data.bill && data.bill.charge != null ? `${data.bill.charge}원` : 'n/a';
+    const msg = `[EnerTalk][local] 당월 ${round(kwh, 2)}kWh / ${charge} (클라우드 billing)`;
+    if (!ctx.loggedBilling) { this.log.info(`${msg} — 병행 정상`); ctx.loggedBilling = true; }
+    else { this.log.debug(msg); }
+  }
+
   _stopTimers(siteId) {
     const ctx = this.contexts.get(siteId);
     if (ctx && ctx.timers) {
@@ -293,6 +458,10 @@ class EnerTalkPlatform {
 
   _stopAllTimers() {
     for (const siteId of this.contexts.keys()) this._stopTimers(siteId);
+    if (this.localCtx && this.localCtx.timers) {
+      for (const t of this.localCtx.timers) clearInterval(t);
+      this.localCtx.timers = [];
+    }
   }
 }
 

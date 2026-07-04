@@ -23,12 +23,26 @@
       (정상 연결은 재시작 후 <b>로그</b>의 <code>[EnerTalk] 로그인 성공 · 실시간 …W</code> 로 확인)
     </p>
 
+    <!-- 로컬 모드 -->
+    <label class="et-check"><input type="checkbox" id="f_local"><span>로컬 모드 (기기를 클라우드 대신 이 호스트로 직접 받기)</span></label>
+    <p class="et-sub et-indent" style="margin:2px 0 8px;">
+      켜면 이 호스트가 <code>:포트</code> TLS 서버를 열어 기기 데이터를 직접 받습니다.
+      라우터에서 <code>eddie-ext.encoredtech.com</code> → <b>이 홈브릿지 호스트 IP</b> 로 DNS 리다이렉트가 필요합니다.
+      클라우드가 죽어도 실시간 전력이 동작합니다.
+    </p>
+    <div class="et-row et-indent" id="f_lportRow">
+      <label for="f_lport">로컬 서버 포트</label>
+      <input type="number" id="f_lport" class="form-control" value="5010" min="1" max="65535">
+      <div class="et-hint">기본 5010. 보통 그대로.</div>
+    </div>
+
     <div class="et-row">
-      <label for="f_email">에너톡 이메일 *</label>
+      <label for="f_email">에너톡 이메일 <span id="f_emailReq">*</span></label>
       <input type="email" id="f_email" class="form-control" placeholder="you@example.com" autocomplete="off">
+      <div class="et-hint" id="f_emailHint">로컬 모드면 비워도 됩니다(당월 사용량은 클라우드가 있으면 병행, 없으면 기기 누적 카운터).</div>
     </div>
     <div class="et-row">
-      <label for="f_password">에너톡 비밀번호 *</label>
+      <label for="f_password">에너톡 비밀번호 <span id="f_pwReq">*</span></label>
       <input type="password" id="f_password" class="form-control" autocomplete="off">
     </div>
 
@@ -89,6 +103,8 @@
       const c = (cfgs && cfgs[0]) || { platform: PLATFORM };
       $('f_email').value = c.email || '';
       $('f_password').value = c.password || '';
+      $('f_local').checked = c.localMode === true;      // 기본 off
+      $('f_lport').value = c.localPort || 5010;
       $('f_power').checked = c.exposePower !== false;   // 기본 on
       $('f_pname').value = c.powerSensorName || '';
       $('f_usage').checked = c.exposeUsage !== false;   // 기본 on
@@ -104,6 +120,12 @@
         $('f_pnameRow').style.display = $('f_power').checked ? '' : 'none';
         $('f_unameRow').style.display = $('f_usage').checked ? '' : 'none';
         $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none';
+        const local = $('f_local').checked;
+        $('f_lportRow').style.display = local ? '' : 'none';
+        // 로컬 모드면 이메일/비번 필수 표시 완화
+        $('f_emailReq').style.display = local ? 'none' : '';
+        $('f_pwReq').style.display = local ? 'none' : '';
+        $('f_emailHint').style.display = local ? '' : 'none';
       };
       refresh();
 
@@ -111,6 +133,8 @@
         const cfg = { platform: PLATFORM };
         cfg.email = $('f_email').value.trim();
         cfg.password = $('f_password').value;
+        cfg.localMode = $('f_local').checked;
+        if (cfg.localMode) cfg.localPort = Number($('f_lport').value) || 5010;
         cfg.exposePower = $('f_power').checked;
         const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn;
         cfg.exposeUsage = $('f_usage').checked;
@@ -125,9 +149,9 @@
       }
       async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증 */ } }
 
-      ['f_email', 'f_password', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing', 'f_cid', 'f_csec']
+      ['f_email', 'f_password', 'f_lport', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing', 'f_cid', 'f_csec']
         .forEach((id) => $(id).addEventListener('input', sync));
-      ['f_power', 'f_usage', 'f_outlet'].forEach((id) =>
+      ['f_power', 'f_usage', 'f_outlet', 'f_local'].forEach((id) =>
         $(id).addEventListener('change', () => { refresh(); sync(); }));
       await sync();
     })();

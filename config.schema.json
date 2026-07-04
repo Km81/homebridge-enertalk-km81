@@ -3,22 +3,36 @@
   "pluginType": "platform",
   "singular": true,
   "customUi": true,
-  "headerDisplay": "EnerTalk(Encored) 전력 미터를 HomeKit 으로 노출합니다(read-only). 에너톡 앱 로그인 이메일/비밀번호만 있으면 됩니다. '실시간 전력'과 '당월 사용량'을 각각 켜고/끌 수 있고, 켜면 이름을 지정할 수 있습니다. 각 센서는 조도센서(lux) 로 홈 앱에 숫자가 뜨고, Eve 특성(W/kWh/V/A)+그래프도 함께 제공됩니다.",
-  "footerDisplay": "developer.enertalk.com 이 폐쇄돼도 auth2/api2 는 동작합니다. client_id/secret 은 비워두면 앱 기본값을 사용합니다.",
+  "headerDisplay": "EnerTalk(Encored) 전력 미터를 HomeKit 으로 노출합니다(read-only). **클라우드 모드**(에너톡 이메일/비밀번호로 api2 조회) 또는 **로컬 모드**(기기를 클라우드 대신 이 호스트로 직접 받음, DNS 리다이렉트 필요)로 동작합니다. '실시간 전력'과 '당월 사용량'을 각각 켜고/끌 수 있고, 켜면 이름을 지정할 수 있습니다. 각 센서는 조도센서(lux) 로 홈 앱에 숫자가 뜨고, Eve 특성(W/kWh/V/A)+그래프도 함께 제공됩니다.",
+  "footerDisplay": "로컬 모드: 라우터에서 eddie-ext.encoredtech.com 을 이 홈브릿지 호스트 IP 로 돌리면 기기가 클라우드 대신 여기로 붙습니다(클라우드가 죽어도 동작). 클라우드 모드: developer.enertalk.com 이 폐쇄돼도 auth2/api2 는 동작합니다. client_id/secret 은 비워두면 앱 기본값을 사용합니다.",
   "schema": {
     "type": "object",
     "properties": {
       "email": {
-        "title": "에너톡 이메일",
+        "title": "에너톡 이메일 (클라우드 모드)",
         "type": "string",
-        "required": true,
-        "format": "email"
+        "format": "email",
+        "description": "클라우드 모드에 필요. 로컬 모드만 쓰면 비워도 됩니다(비우면 당월 사용량은 기기 누적 카운터 사용)."
       },
       "password": {
-        "title": "에너톡 비밀번호",
+        "title": "에너톡 비밀번호 (클라우드 모드)",
         "type": "string",
-        "required": true,
         "x-schema-form": { "type": "password" }
+      },
+      "localMode": {
+        "title": "로컬 모드 (기기 직수신)",
+        "type": "boolean",
+        "default": false,
+        "description": "켜면 이 호스트가 :5010 TLS 서버를 열어 기기 데이터를 직접 받습니다. 라우터에서 eddie-ext.encoredtech.com → 이 호스트 IP 로 DNS 리다이렉트가 필요합니다. 클라우드 없이 실시간 전력이 동작합니다."
+      },
+      "localPort": {
+        "title": "로컬 서버 포트",
+        "type": "integer",
+        "default": 5010,
+        "minimum": 1,
+        "maximum": 65535,
+        "condition": { "functionBody": "return model.localMode === true;" },
+        "description": "기기가 접속하는 포트(기본 5010). 보통 그대로 둡니다."
       },
       "exposePower": {
         "title": "실시간 전력 액세서리 추가",
@@ -81,7 +95,6 @@
         "type": "string",
         "x-schema-form": { "type": "password" }
       }
-    },
-    "required": ["email", "password"]
+    }
   }
 }
