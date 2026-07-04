@@ -38,6 +38,14 @@ class EnerTalkPlatform {
 
     this.Eve = buildEveCharacteristics(this.hap);
 
+    // Eve 그래프용 히스토리 로깅(fakegato-history). 로드 실패해도 플러그인은 값 노출은 계속.
+    try {
+      this.FakeGato = require('fakegato-history')(this.api);
+    } catch (e) {
+      this.FakeGato = null;
+      this.log.warn('[EnerTalk] fakegato-history 로드 실패 — Eve 그래프 비활성(값 표시는 정상):', e.message);
+    }
+
     this.pollingInterval = Math.max(10, Number(this.config.pollingInterval) || 30);  // 초, 실시간
     this.billingInterval = Math.max(60, Number(this.config.billingInterval) || 300); // 초, 당월 누적
     this.exposeOutlet = this.config.exposeOutlet === true;
@@ -145,6 +153,19 @@ class EnerTalkPlatform {
     this._ensureCharacteristic(powerLux, this.Eve.Voltage);
     this._ensureCharacteristic(powerLux, this.Eve.ElectricCurrent);
 
+    // Eve 그래프용 히스토리 서비스(실시간 전력 액세서리에 부착) — W 를 시계열로 로깅
+    let history = null;
+    if (this.FakeGato) {
+      try {
+        history = new this.FakeGato('energy', pAcc, {
+          storage: 'fs',
+          path: this.api.user.storagePath(),
+        });
+      } catch (e) {
+        this.log.warn('[EnerTalk] 히스토리 서비스 생성 실패:', e.message);
+      }
+    }
+
     // ── 2) 당월 사용량 센서 (독립 액세서리, lux=kWh) + Eve kWh ─────────
     const uUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:usage`);
     seen.add(uUuid);
@@ -181,7 +202,7 @@ class EnerTalkPlatform {
 
     // ── 폴링 ──────────────────────────────────────────────────────
     this._stopTimers(site.id);
-    const ctx = { site, powerLux, usageLux, outlet, timers: [], loggedRealtime: false, loggedBilling: false };
+    const ctx = { site, powerLux, usageLux, outlet, history, timers: [], loggedRealtime: false, loggedBilling: false };
     this.contexts.set(site.id, ctx);
 
     const pollRealtime = () => this._pollRealtime(site.id).catch((e) =>
@@ -219,6 +240,10 @@ class EnerTalkPlatform {
       ctx.outlet.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
       ctx.outlet.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
       ctx.outlet.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+    }
+
+    if (ctx.history) {
+      try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 로깅 실패 무시 */ }
     }
 
     const msg = `[EnerTalk] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A`;
