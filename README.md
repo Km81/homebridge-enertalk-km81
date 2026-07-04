@@ -40,8 +40,9 @@ npm install -g homebridge-enertalk-km81
 
 ## 설정
 
-Config UI X 의 커스텀 설정 화면(`EnerTalkKm81`)에서 이메일/비밀번호를 입력하고 **"연결 테스트"**
-로 확인한 뒤 저장하거나, `config.json` 의 `platforms` 에 아래를 추가합니다.
+Config UI X 의 커스텀 설정 화면(`EnerTalkKm81`)에서 이메일/비밀번호를 입력하고 저장하거나,
+`config.json` 의 `platforms` 에 아래를 추가합니다. 정상 연결 여부는 재시작 후 **Homebridge 로그**
+의 `[EnerTalk] 로그인 성공 · 실시간 …W` 로 확인됩니다.
 
 ```json
 {

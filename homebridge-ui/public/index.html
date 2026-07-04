@@ -11,19 +11,15 @@
     .et-row .et-hint { color: #8a9099; font-size: 0.76rem; margin-top: 3px; }
     .et-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 0.88rem; }
     .et-adv summary { cursor: pointer; color: #6c757d; font-size: 0.85rem; margin: 6px 0; }
-    .et-result { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.5; display: none; }
-    .et-result.show { display: block; }
-    .et-result.ok   { background: #e6f4ea; color: #1e7e34; border: 1px solid #bfe3c9; }
-    .et-result.none { background: #fdecea; color: #b02a37; border: 1px solid #f3c4c0; }
-    .et-result.wait { background: #fff6e5; color: #946200; border: 1px solid #f0dcb0; }
   </style>
 </head>
 <body>
   <div class="et-card">
     <div class="et-title">EnerTalk 설정</div>
     <p class="et-sub">
-      에너톡 앱 이메일/비밀번호를 입력하고 <b>연결 테스트</b>로 확인한 뒤, 하단 <b>SAVE(저장)</b> → Homebridge 재시작 하세요.
+      에너톡 앱 이메일/비밀번호를 입력하고 하단 <b>SAVE(저장)</b> → Homebridge 재시작 하세요.
       실시간 전력·당월 사용량이 각각 독립 액세서리로 등록되어 홈 앱에서 이름을 따로 바꿀 수 있습니다.
+      (정상 연결 여부는 재시작 후 <b>Homebridge 로그</b>의 <code>[EnerTalk] 로그인 성공 · 실시간 …W</code> 로 확인됩니다.)
     </p>
 
     <div class="et-row">
@@ -73,19 +69,14 @@
         <input type="password" id="f_csec" class="form-control" placeholder="비우면 앱 기본값" autocomplete="off">
       </div>
     </details>
-
-    <button id="etTestBtn" class="btn btn-primary btn-sm" type="button" style="margin-top:10px;">연결 테스트 / 사이트 조회</button>
-    <div id="etResult" class="et-result"></div>
   </div>
 
   <script>
     (async () => {
       const PLATFORM = 'EnerTalkKm81';
       const $ = (id) => document.getElementById(id);
-      const resultEl = $('etResult');
-      const setResult = (cls, html) => { resultEl.className = 'et-result show ' + cls; resultEl.innerHTML = html; };
 
-      // 1) 기존 설정 로드 → 폼 채우기
+      // 기존 설정 로드 → 폼 채우기
       let cfgs = [];
       try { cfgs = await homebridge.getPluginConfig(); } catch (e) { cfgs = []; }
       const c = (cfgs && cfgs[0]) || { platform: PLATFORM };
@@ -103,7 +94,7 @@
       const refreshOutletRow = () => { $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none'; };
       refreshOutletRow();
 
-      // 2) 폼 → 플러그인 설정 반영 (하단 SAVE 가 이 값을 저장)
+      // 폼 → 플러그인 설정 반영 (하단 SAVE 가 이 값을 저장)
       function collect() {
         const cfg = { platform: PLATFORM };
         cfg.email = $('f_email').value.trim();
@@ -123,46 +114,6 @@
         .forEach((id) => $(id).addEventListener('input', sync));
       $('f_outlet').addEventListener('change', () => { refreshOutletRow(); sync(); });
       await sync();
-
-      // 3) 연결 테스트 (도우미 서버 무응답 시 무한대기 방지 — 45초 타임아웃)
-      function withTimeout(promise, ms, msg) {
-        let t;
-        const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(msg)), ms); });
-        return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
-      }
-
-      $('etTestBtn').addEventListener('click', async () => {
-        const cfg = collect();
-        if (!cfg.email || !cfg.password) {
-          setResult('none', '이메일/비밀번호를 먼저 입력하세요.');
-          return;
-        }
-        homebridge.showSpinner();
-        setResult('wait', '로그인 및 조회 중…');
-        try {
-          const r = await withTimeout(
-            homebridge.request('/test', {
-              email: cfg.email, password: cfg.password, clientId: cfg.clientId, clientSecret: cfg.clientSecret,
-            }),
-            45000,
-            '시간 초과 — 설정 도우미 서버가 응답하지 않습니다. (플러그인 본체 동작과는 무관하니, 값만 입력 후 SAVE 하고 재시작해도 됩니다.)',
-          );
-          if (!r || !r.ok) {
-            setResult('none', '실패: ' + ((r && r.error) || '알 수 없는 오류'));
-          } else {
-            let html = '<b>연결 성공 ✓</b><br>사이트 ' + r.sites.length + '개';
-            if (r.sites.length) html += ': ' + r.sites.map((s) => s.name + ' (' + String(s.id).slice(0, 8) + '…)').join(', ');
-            if (r.realtime) html += '<br>실시간: <b>' + r.realtime.watts + ' W</b> / ' + r.realtime.volts + ' V / ' + r.realtime.amps + ' A';
-            if (r.billing) html += '<br>당월 누적: <b>' + r.billing.kwh + ' kWh</b>' + (r.billing.charge != null ? (' / ' + r.billing.charge + '원') : '');
-            setResult('ok', html);
-            homebridge.toast.success('EnerTalk 연결 성공');
-          }
-        } catch (e) {
-          setResult('none', (e && e.message ? e.message : String(e)));
-        } finally {
-          homebridge.hideSpinner();
-        }
-      });
     })();
   </script>
 </body>
