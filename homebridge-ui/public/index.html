@@ -196,14 +196,17 @@
           const cur = res && res.current;
           const fmt = (n) => (n == null ? '-' : Number(n).toLocaleString());
           let html = '<table style="width:100%; border-collapse:collapse; font-size:0.86rem;">';
-          html += '<tr style="border-bottom:1px solid #ddd; color:#6c757d;"><th style="text-align:left; padding:4px;">월</th><th style="text-align:right; padding:4px;">사용량(kWh)</th><th style="text-align:right; padding:4px;">요금(원)</th></tr>';
+          html += '<tr style="border-bottom:1px solid #ddd; color:#6c757d;"><th style="text-align:left; padding:4px;">월</th><th style="text-align:right; padding:4px;">사용량(kWh)</th></tr>';
           if (cur) {
-            html += `<tr style="background:#eef6ff;"><td style="padding:4px;"><b>당월(현재까지)</b></td><td style="text-align:right; padding:4px;"><b>${fmt(cur.kwh)}</b></td><td style="text-align:right; padding:4px;">${fmt(cur.charge)}</td></tr>`;
+            html += `<tr style="background:#eef6ff;"><td style="padding:4px;"><b>당월(현재까지)</b></td><td style="text-align:right; padding:4px;"><b>${fmt(cur.kwh)}</b></td></tr>`;
           }
           months.slice().reverse().forEach((m) => {
-            html += `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${m.month}</td><td style="text-align:right; padding:4px;">${fmt(m.kwh)}</td><td style="text-align:right; padding:4px;">${fmt(m.charge)}</td></tr>`;
+            html += `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${m.month}</td><td style="text-align:right; padding:4px;">${fmt(m.kwh)}</td></tr>`;
           });
           html += '</table>';
+          if (!months.length) {
+            html += '<div style="color:#8a9099; font-size:0.8rem; margin-top:6px;">아직 기록된 과거 월이 없습니다. 로컬 모드로 두면 매월 검침일마다 한 달씩 자동으로 쌓입니다.</div>';
+          }
           if (!months.length && !cur) html = '<div style="color:#6c757d;">데이터가 없습니다.</div>';
           monthlyOut.innerHTML = html;
         } catch (e) {
