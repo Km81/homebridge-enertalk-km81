@@ -37,12 +37,15 @@ DEVICE_IP = os.environ.get("DEVICE_IP")
 DEVICE_MAC = (os.environ.get("DEVICE_MAC") or "").lower() or None
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "5010"))
 GATEWAY_IP = os.environ.get("GATEWAY_IP") or None
+GATEWAY_MAC = None
 IFACE = os.environ.get("IFACE") or None
 INTERVAL = float(os.environ.get("SPOOF_INTERVAL", "2"))
 
 if not DEVICE_IP:
     log("ERROR: DEVICE_IP 환경변수가 필요합니다.")
     sys.exit(1)
+
+stop = threading.Event()
 
 
 def sh(cmd):
@@ -63,7 +66,7 @@ conf.iface = IFACE
 MY_MAC = get_if_hwaddr(IFACE)
 
 
-def resolve_mac(ip, tries=6):
+def resolve_mac(ip, tries=3):
     for _ in range(tries):
         try:
             m = getmacbyip(ip)
@@ -71,25 +74,32 @@ def resolve_mac(ip, tries=6):
             m = None
         if m:
             return m.lower()
-        time.sleep(1)
+        if stop.wait(1):
+            return None
     return None
 
 
 log("iface=%s my_mac=%s" % (IFACE, MY_MAC))
 log("device=%s gateway=%s port=%d" % (DEVICE_IP, GATEWAY_IP, LOCAL_PORT))
 
-if not DEVICE_MAC:
-    DEVICE_MAC = resolve_mac(DEVICE_IP)
-GATEWAY_MAC = resolve_mac(GATEWAY_IP)
-log("device_mac=%s gateway_mac=%s" % (DEVICE_MAC, GATEWAY_MAC))
-if not DEVICE_MAC or not GATEWAY_MAC:
-    log("ERROR: MAC 확인 실패 — DEVICE_MAC / GATEWAY_IP 를 환경변수로 지정하세요.")
-    sys.exit(1)
-
 RULE = "PREROUTING -s %s -p tcp --dport %d -j REDIRECT --to-ports %d" % (
     DEVICE_IP, LOCAL_PORT, LOCAL_PORT)
 
-stop = threading.Event()
+
+def resolve_macs_blocking():
+    """기기/게이트웨이 MAC 을 확보할 때까지 대기(크래시 루프 대신 재시도 — #25)."""
+    global DEVICE_MAC, GATEWAY_MAC
+    while not stop.is_set():
+        if not DEVICE_MAC:
+            DEVICE_MAC = resolve_mac(DEVICE_IP)
+        if not GATEWAY_MAC:
+            GATEWAY_MAC = resolve_mac(GATEWAY_IP)
+        if DEVICE_MAC and GATEWAY_MAC:
+            log("device_mac=%s gateway_mac=%s" % (DEVICE_MAC, GATEWAY_MAC))
+            return True
+        log("MAC 확인 대기 중 (device=%s gateway=%s) — 기기/게이트웨이 전원 확인. 10초 후 재시도" % (DEVICE_MAC, GATEWAY_MAC))
+        stop.wait(10)
+    return False
 
 
 def enable_forward():
@@ -112,30 +122,55 @@ def del_iptables():
     log("iptables REDIRECT 제거")
 
 
+def flush_conntrack():
+    """기기의 기존 TCP 연결 conntrack 을 비워 재접속을 유도(기기 재부팅 없이 즉시 잡힘 — #22)."""
+    r = sh("conntrack -D -s %s -p tcp --dport %d 2>/dev/null" % (DEVICE_IP, LOCAL_PORT))
+    if r.returncode == 0:
+        log("conntrack flush — 기기 재접속 유도")
+
+
+def spoof_once():
+    sendp(Ether(dst=DEVICE_MAC) / ARP(op=2, psrc=GATEWAY_IP, hwsrc=MY_MAC, pdst=DEVICE_IP, hwdst=DEVICE_MAC),
+          iface=IFACE, verbose=0)
+    sendp(Ether(dst=GATEWAY_MAC) / ARP(op=2, psrc=DEVICE_IP, hwsrc=MY_MAC, pdst=GATEWAY_IP, hwdst=GATEWAY_MAC),
+          iface=IFACE, verbose=0)
+
+
 def spoof_loop():
-    to_dev = Ether(dst=DEVICE_MAC) / ARP(op=2, psrc=GATEWAY_IP, hwsrc=MY_MAC, pdst=DEVICE_IP, hwdst=DEVICE_MAC)
-    to_gw = Ether(dst=GATEWAY_MAC) / ARP(op=2, psrc=DEVICE_IP, hwsrc=MY_MAC, pdst=GATEWAY_IP, hwdst=GATEWAY_MAC)
+    global DEVICE_MAC, GATEWAY_MAC
     n = 0
-    # 하트비트 주기(초) — 살아있음 확인용
     hb_every = max(1, int(60 / INTERVAL)) if INTERVAL > 0 else 30
+    reresolve_every = max(1, int(300 / INTERVAL)) if INTERVAL > 0 else 150
     while not stop.is_set():
-        sendp(to_dev, iface=IFACE, verbose=0)
-        sendp(to_gw, iface=IFACE, verbose=0)
-        n += 1
-        if n % 30 == 0:
-            add_iptables()  # 혹시 규칙이 사라졌으면 재적용
-        if n % hb_every == 0:
-            log("정상 동작 중 — ARP %d회 전송, iptables REDIRECT 유지 (기기 %s → 로컬 :%d)" % (n, DEVICE_IP, LOCAL_PORT))
+        try:
+            spoof_once()
+            n += 1
+            if n % 30 == 0:
+                add_iptables()  # 규칙이 사라졌으면 재적용
+            if n % reresolve_every == 0:
+                # 기기/게이트웨이 재부팅·교체로 MAC 이 바뀌면 스푸핑이 무력화되므로 주기적 재확인(#8)
+                gm = resolve_mac(GATEWAY_IP, tries=1)
+                if gm and gm != GATEWAY_MAC:
+                    log("게이트웨이 MAC 변경 감지: %s → %s" % (GATEWAY_MAC, gm)); GATEWAY_MAC = gm
+                dm = resolve_mac(DEVICE_IP, tries=1)
+                if dm and dm != DEVICE_MAC:
+                    log("기기 MAC 변경 감지: %s → %s" % (DEVICE_MAC, dm)); DEVICE_MAC = dm
+            if n % hb_every == 0:
+                log("정상 동작 중 — ARP %d회 전송, iptables REDIRECT 유지 (기기 %s → 로컬 :%d)" % (n, DEVICE_IP, LOCAL_PORT))
+        except Exception as e:
+            # 일시적 오류로 스레드가 조용히 죽지 않도록 방어(#9)
+            log("spoof 루프 오류(계속 진행):", e)
         stop.wait(INTERVAL)
 
 
 def restore():
     try:
-        sendp(Ether(dst=DEVICE_MAC) / ARP(op=2, psrc=GATEWAY_IP, hwsrc=GATEWAY_MAC, pdst=DEVICE_IP, hwdst=DEVICE_MAC),
-              iface=IFACE, count=5, verbose=0)
-        sendp(Ether(dst=GATEWAY_MAC) / ARP(op=2, psrc=DEVICE_IP, hwsrc=DEVICE_MAC, pdst=GATEWAY_IP, hwdst=GATEWAY_MAC),
-              iface=IFACE, count=5, verbose=0)
-        log("ARP 원복 완료")
+        if DEVICE_MAC and GATEWAY_MAC:
+            sendp(Ether(dst=DEVICE_MAC) / ARP(op=2, psrc=GATEWAY_IP, hwsrc=GATEWAY_MAC, pdst=DEVICE_IP, hwdst=DEVICE_MAC),
+                  iface=IFACE, count=5, verbose=0)
+            sendp(Ether(dst=GATEWAY_MAC) / ARP(op=2, psrc=DEVICE_IP, hwsrc=DEVICE_MAC, pdst=GATEWAY_IP, hwdst=GATEWAY_MAC),
+                  iface=IFACE, count=5, verbose=0)
+            log("ARP 원복 완료")
     except Exception as e:
         log("ARP 원복 오류(무시):", e)
 
@@ -148,10 +183,14 @@ def shutdown(*_):
 signal.signal(signal.SIGTERM, shutdown)
 signal.signal(signal.SIGINT, shutdown)
 
+if not resolve_macs_blocking():
+    sys.exit(0)  # 종료 신호로 나온 경우
+
 enable_forward()
 add_iptables()
+flush_conntrack()
 log("리다이렉트 시작 — 기기가 재접속하면 로컬 플러그인(:%d)으로 붙습니다." % LOCAL_PORT)
-log("빠른 활성화 팁: 에너톡 기기를 한 번 재부팅(전원 뺐다 꽂기)하면 즉시 잡힙니다.")
+log("빠른 활성화 팁: 안 잡히면 에너톡 기기를 한 번 재부팅(전원 뺐다 꽂기).")
 
 th = threading.Thread(target=spoof_loop, daemon=True)
 th.start()

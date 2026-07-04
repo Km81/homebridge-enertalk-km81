@@ -83,6 +83,9 @@ class EnerTalkPlatform {
         boot.catch((e) => this.log.error('[EnerTalk] 시작 실패:', e && e.message ? e.message : e));
       });
       this.api.on('shutdown', () => {
+        this._stopped = true;
+        if (this._startRetryTimer) { clearTimeout(this._startRetryTimer); this._startRetryTimer = null; }
+        if (this._localRetryTimer) { clearTimeout(this._localRetryTimer); this._localRetryTimer = null; }
         this._stopAllTimers();
         if (this.localServer) { try { this.localServer.stop(); } catch (e) { /* 무시 */ } }
       });
@@ -94,14 +97,17 @@ class EnerTalkPlatform {
     this.accessories.set(accessory.UUID, accessory);
   }
 
-  async _start() {
-    if (!this.enabled) return;
+  async _start(attempt = 0) {
+    if (!this.enabled || this._stopped) return;
 
     let sites;
     try {
       sites = await this.client.getSites();
     } catch (e) {
-      this.log.error('[EnerTalk] site 목록 조회 실패 — 이메일/비밀번호를 확인하세요:', e.message);
+      // 부팅 시점 일시적 실패(네트워크 미준비/타임아웃/5xx)로 영구 사망하지 않도록 백오프 재시도.
+      const delay = Math.min(600, 30 * Math.pow(2, attempt)) * 1000;
+      this.log.warn(`[EnerTalk] site 목록 조회 실패 — ${Math.round(delay / 1000)}초 후 재시도 (이메일/비밀번호도 확인): ${e.message}`);
+      this._startRetryTimer = setTimeout(() => this._start(attempt + 1), delay);
       return;
     }
     if (!Array.isArray(sites) || sites.length === 0) {
@@ -254,22 +260,23 @@ class EnerTalkPlatform {
     if (!ctx) return;
     const data = await this.client.getRealtime(ctx.site.id);
 
-    const watts = EnerTalkApi.toWatts(data.activePower);
-    const volts = EnerTalkApi.toVolts(data.voltage);
-    const amps = EnerTalkApi.toAmps(data.current);
+    const watts = clamp0(EnerTalkApi.toWatts(data.activePower));
+    const volts = clamp0(EnerTalkApi.toVolts(data.voltage));
+    const amps = clamp0(EnerTalkApi.toAmps(data.current));
 
-    if (ctx.powerLux) {
+    // 응답 필드 누락(NaN)이면 갱신 스킵 → 직전 값 유지(허위 0 기록 방지 #3)
+    if (ctx.powerLux && Number.isFinite(watts)) {
       ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(watts));
       ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
-      ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
-      ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+      if (Number.isFinite(volts)) ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
+      if (Number.isFinite(amps)) ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
     }
-    if (ctx.outlet) {
+    if (ctx.outlet && Number.isFinite(watts)) {
       ctx.outlet.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
-      ctx.outlet.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
-      ctx.outlet.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+      if (Number.isFinite(volts)) ctx.outlet.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
+      if (Number.isFinite(amps)) ctx.outlet.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
     }
-    if (ctx.history) {
+    if (ctx.history && Number.isFinite(watts)) {
       try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
     }
 
@@ -284,12 +291,14 @@ class EnerTalkPlatform {
     const data = await this.client.getBilling(ctx.site.id);
 
     const kwh = EnerTalkApi.toKwh(data.usage);
-    if (ctx.usageLux) {
-      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
-      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
-    }
-    if (ctx.outlet) {
-      ctx.outlet.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    if (Number.isFinite(kwh)) {
+      if (ctx.usageLux) {
+        ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+        ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+      }
+      if (ctx.outlet) {
+        ctx.outlet.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+      }
     }
 
     const charge = data && data.bill && data.bill.charge != null ? `${data.bill.charge}원` : 'n/a';
@@ -315,46 +324,15 @@ class EnerTalkPlatform {
       log: this.log,
     });
 
-    // 1) siteId 확정 — 액세서리 UUID 를 '클라우드 모드와 동일'하게 만들어,
-    //    클라우드↔로컬 전환 시 홈킷 재배치가 필요 없게 한다.
-    //    (클라우드 살아있으면 조회해서 저장, 죽었으면 저장된 값 재사용, 둘 다 없으면 'local')
+    // 1) siteId 확정 — 저장된 값(클라우드 모드와 동일 UUID) 우선. 없으면 'local' 로 시작하되
+    //    클라우드가 살아나면 백그라운드에서 실제 siteId 로 승격(#12 churn 최소화).
     this._billingSiteId = null;
-    let siteId = this._loadSiteId();
-    if (this.client) {
-      try {
-        const sites = await this.client.getSites();
-        if (Array.isArray(sites) && sites.length && sites[0].id) {
-          siteId = sites[0].id;
-          this._billingSiteId = siteId;
-          this._saveSiteId(siteId);
-        }
-      } catch (e) {
-        this.log.warn('[EnerTalk][local] 클라우드 site 조회 실패 — 저장된 site 로 진행:', e.message);
-      }
-    }
-    if (!siteId) siteId = 'local';
-    this._localSiteId = siteId;
+    this._localSiteId = this._loadSiteId() || 'local';
 
     // 2) 로컬 액세서리 준비(클라우드 모드와 동일 UUID)
-    this._setupLocalAccessories(siteId);
+    this._setupLocalAccessories(this._localSiteId);
 
-    // 3) 클라우드 병행: billing 으로 검침일/기준선 보정 + 실시간 자동 폴백
-    if (this._billingSiteId) {
-      this.log.info(`[EnerTalk][local] 클라우드 병행 활성 (site ${this._billingSiteId}) — 검침일/기준선 보정 + 실시간 자동 폴백`);
-      const pollBill = () => this._pollLocalBilling().catch((e) =>
-        this.log.warn('[EnerTalk][local] billing 오류:', e.message));
-      pollBill();
-      this.localCtx.timers.push(setInterval(pollBill, this.billingInterval * 1000));
-
-      const staleMs = Math.max(30, Number(this.config.localStaleSeconds) || 90) * 1000;
-      const pollRt = () => this._pollLocalRealtimeFallback(this._billingSiteId, staleMs).catch((e) =>
-        this.log.debug('[EnerTalk][local] 실시간 폴백 오류:', e.message));
-      this.localCtx.timers.push(setInterval(pollRt, this.pollingInterval * 1000));
-    } else {
-      this.log.info('[EnerTalk][local] 클라우드 없음 — 완전 로컬 (당월=기기 카운터, 검침일=설정값 또는 기본 1일, 폴백 없음).');
-    }
-
-    // 4) TLS 서버 시작
+    // 3) TLS 서버 시작(먼저 열어 기기 수신 준비)
     this.localServer = new LocalServer({ port: this.localPort, log: this.log });
     this.localServer.on('reading', (r) => {
       try { this._onLocalReading(r); } catch (e) { this.log.debug('[EnerTalk][local] reading 처리 오류:', e.message); }
@@ -364,6 +342,46 @@ class EnerTalkPlatform {
     } catch (e) {
       this.log.error('[EnerTalk][local] TLS 서버 시작 실패:', e && e.message);
     }
+
+    // 4) 클라우드 병행(billing 보정 + 실시간 폴백) — 실패해도 재시도로 세션 내내 살림(#5)
+    if (this.client) this._ensureCloudCompanion(0);
+    else this.log.info('[EnerTalk][local] 클라우드 없음 — 완전 로컬 (당월=기기 카운터, 검침일=설정값 또는 기본 1일, 폴백 없음).');
+  }
+
+  /** 로컬 모드에서 클라우드 site 조회 → billing/폴백 타이머 기동. 실패 시 백오프 재시도. */
+  async _ensureCloudCompanion(attempt) {
+    if (this._stopped || !this.client || this._billingSiteId) return;
+    let siteId = null;
+    try {
+      const sites = await this.client.getSites();
+      if (Array.isArray(sites) && sites.length && sites[0].id) siteId = sites[0].id;
+    } catch (e) {
+      const delay = Math.min(600, 30 * Math.pow(2, attempt)) * 1000;
+      this.log.warn(`[EnerTalk][local] 클라우드 site 조회 실패 — ${Math.round(delay / 1000)}초 후 재시도(로컬은 계속 동작): ${e.message}`);
+      this._localRetryTimer = setTimeout(() => this._ensureCloudCompanion(attempt + 1), delay);
+      return;
+    }
+    if (!siteId) return;
+    this._billingSiteId = siteId;
+    this._saveSiteId(siteId);
+
+    // 최초 부팅이 클라우드 장애와 겹쳐 'local' 로 시작했다면, 실제 siteId 로 액세서리 승격(1회 churn)
+    if (this._localSiteId !== siteId) {
+      this.log.info(`[EnerTalk][local] 클라우드 복구 — 액세서리 site 승격 (${this._localSiteId} → ${siteId})`);
+      this._localSiteId = siteId;
+      this._setupLocalAccessories(siteId);
+    }
+
+    this.log.info(`[EnerTalk][local] 클라우드 병행 활성 (site ${siteId}) — 검침일/기준선 보정 + 실시간 자동 폴백`);
+    const pollBill = () => this._pollLocalBilling().catch((e) =>
+      this.log.warn('[EnerTalk][local] billing 오류:', e.message));
+    pollBill();
+    this.localCtx.timers.push(setInterval(pollBill, this.billingInterval * 1000));
+
+    const staleMs = Math.max(30, Number(this.config.localStaleSeconds) || 90) * 1000;
+    const pollRt = () => this._pollLocalRealtimeFallback(this._billingSiteId, staleMs).catch((e) =>
+      this.log.debug('[EnerTalk][local] 실시간 폴백 오류:', e.message));
+    this.localCtx.timers.push(setInterval(pollRt, this.pollingInterval * 1000));
   }
 
   _siteFile() { return require('path').join(this._storageDir || '.', 'enertalk-km81-site.json'); }
@@ -372,8 +390,12 @@ class EnerTalkPlatform {
     catch (e) { return null; }
   }
   _saveSiteId(id) {
-    try { require('fs').writeFileSync(this._siteFile(), JSON.stringify({ siteId: id })); }
-    catch (e) { this.log.debug('[EnerTalk][local] site 저장 실패:', e.message); }
+    try {
+      const fs = require('fs');
+      const tmp = this._siteFile() + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify({ siteId: id }));
+      fs.renameSync(tmp, this._siteFile());
+    } catch (e) { this.log.debug('[EnerTalk][local] site 저장 실패:', e.message); }
   }
 
   _setupLocalAccessories(siteId) {
@@ -436,7 +458,8 @@ class EnerTalkPlatform {
       timers: [],
       loggedRealtime: false, loggedBilling: false,
       cloudBilling: false,   // billing 이 채워졌는지
-      lastLocalMs: 0,        // 마지막 로컬(기기 직수신) 시각
+      deviceId: null,        // 락온한 기기 식별자(다중 기기 오염 방지)
+      lastLocalMs: Date.now(), // 마지막 로컬 수신 시각(부팅 직후 허위 폴백/쓰레기 로그 방지 #17)
       source: null,          // 'local' | 'cloud' — 현재 실시간 소스
       fallbackCount: 0,      // 클라우드 폴백 누적 횟수(불안정성 지표)
       fallbackSinceMs: 0,    // 이번 폴백 시작 시각
@@ -479,20 +502,27 @@ class EnerTalkPlatform {
     }
   }
 
-  /** 실시간 W/V/A 를 로컬 전력 센서 + Eve + 그래프에 반영 (로컬/클라우드 공통). */
+  /**
+   * 실시간 W/V/A 를 로컬 전력 센서 + Eve + 그래프에 반영 (로컬/클라우드 공통).
+   * 유효 숫자가 아닌 값(NaN/누락)은 갱신을 건너뛰어 직전 값을 유지(허위 0 기록 방지 #3).
+   * 음수 전력(역송)은 표시상 0 으로 클램프(Eve minValue:0 위반 방지 #26).
+   */
   _applyRealtime(watts, volts, amps) {
     const ctx = this.localCtx;
     if (!ctx || !ctx.powerLux) return;
-    ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(watts));
-    ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
-    ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
-    ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+    const P = clamp0(watts);
+    if (Number.isFinite(P)) {
+      ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(P));
+      ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(P, 1));
+    }
+    if (Number.isFinite(volts)) ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(clamp0(volts), 1));
+    if (Number.isFinite(amps)) ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(clamp0(amps), 2));
     // fakegato 히스토리는 ~30초 간격으로만 기록(기기가 초당 푸시 → 매초 기록은 낭비).
-    if (ctx.history) {
+    if (ctx.history && Number.isFinite(P)) {
       const now = Date.now();
       if (now - (ctx.lastHistoryMs || 0) >= 30000) {
         ctx.lastHistoryMs = now;
-        try { ctx.history.addEntry({ time: Math.round(now / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
+        try { ctx.history.addEntry({ time: Math.round(now / 1000), power: round(P, 1) }); } catch (e) { /* 무시 */ }
       }
     }
   }
@@ -501,9 +531,18 @@ class EnerTalkPlatform {
     const ctx = this.localCtx;
     if (!ctx) return;
 
-    const watts = r.activePower_mW != null ? r.activePower_mW / 1000 : 0;
-    const volts = r.voltage_mV != null ? r.voltage_mV / 1000 : 0;
-    const amps = r.current_mA != null ? r.current_mA / 1000 : 0;
+    // 다중 EnerTalk 미터 오염 방지: 첫 기기에 락온하고 다른 기기 프레임은 무시(#4)
+    if (r.deviceId) {
+      if (!ctx.deviceId) ctx.deviceId = r.deviceId;
+      else if (ctx.deviceId !== r.deviceId) {
+        if (!ctx._warnedMultiDev) { this.log.warn(`[EnerTalk][local] 다른 기기(${r.deviceId}) 프레임 무시 — 락온: ${ctx.deviceId}`); ctx._warnedMultiDev = true; }
+        return;
+      }
+    }
+
+    const watts = r.activePower_mW != null ? r.activePower_mW / 1000 : NaN;
+    const volts = r.voltage_mV != null ? r.voltage_mV / 1000 : NaN;
+    const amps = r.current_mA != null ? r.current_mA / 1000 : NaN;
 
     ctx.lastLocalMs = Date.now();
     this._applyRealtime(watts, volts, amps);
@@ -544,9 +583,13 @@ class EnerTalkPlatform {
     if (!stale) return; // 로컬 신선 → 클라우드 폴백 불필요
 
     const data = await this.client.getRealtime(siteId);
+    // await 도중 로컬이 복귀했으면 클라우드 값으로 덮어쓰지 않음(경쟁조건 #16)
+    if (Date.now() - ctx.lastLocalMs <= staleMs) return;
+
     const watts = EnerTalkApi.toWatts(data.activePower);
     const volts = EnerTalkApi.toVolts(data.voltage);
     const amps = EnerTalkApi.toAmps(data.current);
+    if (!Number.isFinite(watts)) return; // 응답 필드 누락 → 폴백 표시 스킵
     this._applyRealtime(watts, volts, amps);
 
     const msg = `[EnerTalk][local] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A (클라우드 폴백)`;
@@ -609,6 +652,11 @@ class EnerTalkPlatform {
 function round(n, digits) {
   const f = Math.pow(10, digits);
   return Math.round(Number(n || 0) * f) / f;
+}
+
+/** 음수를 0 으로(역송/노이즈). 유한하지 않으면 그대로 통과(호출부에서 isFinite 로 걸러짐). */
+function clamp0(v) {
+  return (Number.isFinite(v) && v < 0) ? 0 : v;
 }
 
 /** 조도센서 특성은 0.0001~100000 lux 범위. W/kWh 를 그 안으로 클램프. */
