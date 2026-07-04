@@ -43,6 +43,14 @@
         "condition": { "functionBody": "return model.localMode === true;" },
         "description": "로컬(기기 직수신)이 이 시간 이상 끊기면 클라우드로 자동 폴백(클라우드 자격증명 필요). 복구되면 자동 원복. 권장 90초."
       },
+      "meteringDay": {
+        "title": "검침일 (일, 1~31)",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 31,
+        "condition": { "functionBody": "return model.localMode === true;" },
+        "description": "당월 사용량은 기기 누적 카운터에서 이 날짜 기준으로 로컬 산출됩니다. 비우면 클라우드 billing 에서 자동 학습(클라우드 있을 때). 클라우드 없이 쓰려면 검침일을 입력하세요."
+      },
       "exposePower": {
         "title": "실시간 전력 액세서리 추가",
         "type": "boolean",

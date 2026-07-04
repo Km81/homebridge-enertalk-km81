@@ -17,6 +17,7 @@
 const packageJson = require('./package.json');
 const EnerTalkApi = require('./lib/EnerTalkApi.js');
 const LocalServer = require('./lib/LocalServer.js');
+const MonthlyTracker = require('./lib/MonthlyTracker.js');
 const buildEveCharacteristics = require('./lib/EveCharacteristics.js');
 
 const PLUGIN_NAME = packageJson.name;      // homebridge-enertalk-km81
@@ -304,39 +305,55 @@ class EnerTalkPlatform {
   async _startLocal() {
     if (!this.enabled) return;
 
-    // 1) 로컬 액세서리 준비(기기 접속 전에도 미리 등록해 둠)
-    this._setupLocalAccessories();
+    // 0) 저장소 + 당월 사용량 로컬 산출기(기기 누적 카운터 기반, 클라우드로 보정)
+    this._storageDir = '.';
+    try { this._storageDir = this.api.user.storagePath(); } catch (e) { /* 무시 */ }
+    this.monthly = new MonthlyTracker({
+      storageDir: this._storageDir,
+      meteringDay: Number(this.config.meteringDay) || null,
+      log: this.log,
+    });
 
-    // 2) 당월 사용량/요금은 클라우드 billing 이 살아있으면 병행(정확한 '당월' 값).
-    //    클라우드가 죽으면 기기 누적 카운터로 대체.
+    // 1) siteId 확정 — 액세서리 UUID 를 '클라우드 모드와 동일'하게 만들어,
+    //    클라우드↔로컬 전환 시 홈킷 재배치가 필요 없게 한다.
+    //    (클라우드 살아있으면 조회해서 저장, 죽었으면 저장된 값 재사용, 둘 다 없으면 'local')
     this._billingSiteId = null;
+    let siteId = this._loadSiteId();
     if (this.client) {
       try {
         const sites = await this.client.getSites();
         if (Array.isArray(sites) && sites.length && sites[0].id) {
-          this._billingSiteId = sites[0].id;
-          this.log.info(`[EnerTalk][local] 클라우드 병행 활성 (site ${this._billingSiteId}) — 당월 사용량 + 실시간 자동 폴백`);
-
-          // 당월 사용량/요금 폴링
-          const pollBill = () => this._pollLocalBilling().catch((e) =>
-            this.log.warn('[EnerTalk][local] billing 오류:', e.message));
-          pollBill();
-          this.localCtx.timers.push(setInterval(pollBill, this.billingInterval * 1000));
-
-          // 실시간 자동 폴백: 로컬이 끊기면 클라우드로, 복구되면 자동 원복
-          const staleMs = Math.max(30, Number(this.config.localStaleSeconds) || 90) * 1000;
-          const pollRt = () => this._pollLocalRealtimeFallback(this._billingSiteId, staleMs).catch((e) =>
-            this.log.debug('[EnerTalk][local] 실시간 폴백 오류:', e.message));
-          this.localCtx.timers.push(setInterval(pollRt, this.pollingInterval * 1000));
+          siteId = sites[0].id;
+          this._billingSiteId = siteId;
+          this._saveSiteId(siteId);
         }
       } catch (e) {
-        this.log.warn('[EnerTalk][local] 클라우드 병행 사용 불가 — 로컬 전용으로 동작(폴백 없음):', e.message);
+        this.log.warn('[EnerTalk][local] 클라우드 site 조회 실패 — 저장된 site 로 진행:', e.message);
       }
+    }
+    if (!siteId) siteId = 'local';
+    this._localSiteId = siteId;
+
+    // 2) 로컬 액세서리 준비(클라우드 모드와 동일 UUID)
+    this._setupLocalAccessories(siteId);
+
+    // 3) 클라우드 병행: billing 으로 검침일/기준선 보정 + 실시간 자동 폴백
+    if (this._billingSiteId) {
+      this.log.info(`[EnerTalk][local] 클라우드 병행 활성 (site ${this._billingSiteId}) — 검침일/기준선 보정 + 실시간 자동 폴백`);
+      const pollBill = () => this._pollLocalBilling().catch((e) =>
+        this.log.warn('[EnerTalk][local] billing 오류:', e.message));
+      pollBill();
+      this.localCtx.timers.push(setInterval(pollBill, this.billingInterval * 1000));
+
+      const staleMs = Math.max(30, Number(this.config.localStaleSeconds) || 90) * 1000;
+      const pollRt = () => this._pollLocalRealtimeFallback(this._billingSiteId, staleMs).catch((e) =>
+        this.log.debug('[EnerTalk][local] 실시간 폴백 오류:', e.message));
+      this.localCtx.timers.push(setInterval(pollRt, this.pollingInterval * 1000));
     } else {
-      this.log.info('[EnerTalk][local] 클라우드 자격증명 없음 — 로컬 전용(당월=기기 누적 카운터, 폴백 없음).');
+      this.log.info('[EnerTalk][local] 클라우드 없음 — 완전 로컬 (당월=기기 카운터, 검침일=설정값 또는 기본 1일, 폴백 없음).');
     }
 
-    // 3) TLS 서버 시작
+    // 4) TLS 서버 시작
     this.localServer = new LocalServer({ port: this.localPort, log: this.log });
     this.localServer.on('reading', (r) => {
       try { this._onLocalReading(r); } catch (e) { this.log.debug('[EnerTalk][local] reading 처리 오류:', e.message); }
@@ -348,7 +365,17 @@ class EnerTalkPlatform {
     }
   }
 
-  _setupLocalAccessories() {
+  _siteFile() { return require('path').join(this._storageDir || '.', 'enertalk-km81-site.json'); }
+  _loadSiteId() {
+    try { return JSON.parse(require('fs').readFileSync(this._siteFile(), 'utf8')).siteId || null; }
+    catch (e) { return null; }
+  }
+  _saveSiteId(id) {
+    try { require('fs').writeFileSync(this._siteFile(), JSON.stringify({ siteId: id })); }
+    catch (e) { this.log.debug('[EnerTalk][local] site 저장 실패:', e.message); }
+  }
+
+  _setupLocalAccessories(siteId) {
     const { Service, Characteristic } = this.hap;
     const uuidGen = this.api.hap.uuid.generate;
     const powerName = this.config.powerSensorName || '실시간 전력';
@@ -361,11 +388,11 @@ class EnerTalkPlatform {
     let history = null;
 
     if (this.exposePower) {
-      const pUuid = uuidGen(`${PLUGIN_NAME}:local:power`);
+      const pUuid = uuidGen(`${PLUGIN_NAME}:${siteId}:power`);
       seen.add(pUuid);
       const pAcc = this._ensureAccessory(pUuid, powerName, toRegister);
-      pAcc.context.siteId = 'local';
-      this._setInfo(pAcc, { id: 'local' }, 'EnerTalk 실시간 전력(W) · 로컬');
+      pAcc.context.siteId = siteId;
+      this._setInfo(pAcc, { id: siteId }, 'EnerTalk 실시간 전력(W)');
       powerLux = pAcc.getService(Service.LightSensor) || pAcc.addService(Service.LightSensor, powerName);
       powerLux.setCharacteristic(Characteristic.Name, powerName);
       this._ensureCharacteristic(powerLux, this.Eve.CurrentConsumption);
@@ -381,11 +408,11 @@ class EnerTalkPlatform {
     }
 
     if (this.exposeUsage) {
-      const uUuid = uuidGen(`${PLUGIN_NAME}:local:usage`);
+      const uUuid = uuidGen(`${PLUGIN_NAME}:${siteId}:usage`);
       seen.add(uUuid);
       const uAcc = this._ensureAccessory(uUuid, usageName, toRegister);
-      uAcc.context.siteId = 'local';
-      this._setInfo(uAcc, { id: 'local' }, 'EnerTalk 당월/누적 사용량(kWh) · 로컬');
+      uAcc.context.siteId = siteId;
+      this._setInfo(uAcc, { id: siteId }, 'EnerTalk 당월 사용량(kWh)');
       usageLux = uAcc.getService(Service.LightSensor) || uAcc.addService(Service.LightSensor, usageName);
       usageLux.setCharacteristic(Characteristic.Name, usageName);
       this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
@@ -412,7 +439,26 @@ class EnerTalkPlatform {
       source: null,          // 'local' | 'cloud' — 현재 실시간 소스
       fallbackCount: 0,      // 클라우드 폴백 누적 횟수(불안정성 지표)
       fallbackSinceMs: 0,    // 이번 폴백 시작 시각
+      lastCounter_mWh: null, // 기기 누적 에너지 카운터(당월 로컬 산출용)
+      charge: null,          // 클라우드에서 받은 당월 요금(원)
     };
+  }
+
+  /** 당월 사용량(kWh)을 로컬 산출값으로 갱신. 요금(원)은 있으면 로그에 함께. */
+  _updateMonthlyUsage(logInfo) {
+    const ctx = this.localCtx;
+    if (!ctx || !ctx.usageLux) return;
+    let kwh = null;
+    if (ctx.lastCounter_mWh != null && this.monthly) {
+      kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, Date.now());
+    }
+    if (kwh == null) return;
+    ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+    ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    if (logInfo) {
+      const charge = ctx.charge != null ? `${ctx.charge}원` : 'n/a';
+      this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh / ${charge} (로컬 산출) — 정상`);
+    }
   }
 
   /** 실시간 W/V/A 를 로컬 전력 센서 + Eve + 그래프에 반영 (로컬/클라우드 공통). */
@@ -439,11 +485,10 @@ class EnerTalkPlatform {
     ctx.lastLocalMs = Date.now();
     this._applyRealtime(watts, volts, amps);
 
-    // 클라우드 billing 이 없으면 기기 누적 에너지 카운터로 사용량 표시(누적 kWh).
-    if (ctx.usageLux && !ctx.cloudBilling && r.energy_mWh != null) {
-      const kwh = r.energy_mWh / 1e6;
-      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
-      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    // 당월 사용량: 기기 누적 카운터로 로컬 산출(클라우드 없이도 동작).
+    if (r.energy_mWh != null) {
+      ctx.lastCounter_mWh = r.energy_mWh;
+      this._updateMonthlyUsage(false);
     }
 
     const msg = `[EnerTalk][local] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A / ${r.freqHz}Hz (기기 직수신)`;
@@ -490,14 +535,24 @@ class EnerTalkPlatform {
     const ctx = this.localCtx;
     if (!ctx || !ctx.usageLux || !this._billingSiteId || !this.client) return;
     const data = await this.client.getBilling(this._billingSiteId);
-    const kwh = EnerTalkApi.toKwh(data.usage);
-    ctx.cloudBilling = true;
+
+    // 클라우드로 검침일 + 기준선 보정(정확도 유지). 요금(원)도 갱신.
+    if (this.monthly) {
+      this.monthly.learnFromCloud(ctx.lastCounter_mWh, data.usage, data.start, Date.now());
+    }
+    ctx.charge = (data && data.bill && data.bill.charge != null) ? data.bill.charge : null;
+
+    // 표시는 항상 로컬 산출값(클라우드 없어도 동일하게 동작). 카운터 미확보 시 클라우드값으로 임시 표시.
+    let kwh = (ctx.lastCounter_mWh != null && this.monthly)
+      ? this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, Date.now())
+      : EnerTalkApi.toKwh(data.usage);
     ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
     ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
 
-    const charge = data && data.bill && data.bill.charge != null ? `${data.bill.charge}원` : 'n/a';
-    const msg = `[EnerTalk][local] 당월 ${round(kwh, 2)}kWh / ${charge} (클라우드 billing)`;
-    if (!ctx.loggedBilling) { this.log.info(`${msg} — 병행 정상`); ctx.loggedBilling = true; }
+    const charge = ctx.charge != null ? `${ctx.charge}원` : 'n/a';
+    const src = ctx.lastCounter_mWh != null ? '로컬 산출·클라우드 보정' : '클라우드';
+    const msg = `[EnerTalk][local] 당월 ${round(kwh, 2)}kWh / ${charge} (${src})`;
+    if (!ctx.loggedBilling) { this.log.info(`${msg} — 정상`); ctx.loggedBilling = true; }
     else { this.log.debug(msg); }
   }
 

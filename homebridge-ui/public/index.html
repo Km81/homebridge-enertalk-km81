@@ -40,6 +40,11 @@
       <input type="number" id="f_lstale" class="form-control" value="90" min="30" max="3600">
       <div class="et-hint">로컬 수신이 이 시간 이상 끊기면 클라우드로 자동 폴백, 복구되면 원복. (클라우드 자격증명 필요)</div>
     </div>
+    <div class="et-row et-indent" id="f_mdayRow">
+      <label for="f_mday">검침일 (1~31, 선택)</label>
+      <input type="number" id="f_mday" class="form-control" placeholder="비우면 클라우드에서 자동 학습" min="1" max="31">
+      <div class="et-hint">당월 사용량을 기기 카운터로 로컬 산출할 때 쓰는 검침일. 비우면 클라우드 billing 에서 자동 학습. 클라우드 없이 쓰려면 입력.</div>
+    </div>
 
     <div class="et-row">
       <label for="f_email">에너톡 이메일 <span id="f_emailReq">*</span></label>
@@ -111,6 +116,7 @@
       $('f_local').checked = c.localMode === true;      // 기본 off
       $('f_lport').value = c.localPort || 5010;
       $('f_lstale').value = c.localStaleSeconds || 90;
+      $('f_mday').value = c.meteringDay || '';
       $('f_power').checked = c.exposePower !== false;   // 기본 on
       $('f_pname').value = c.powerSensorName || '';
       $('f_usage').checked = c.exposeUsage !== false;   // 기본 on
@@ -129,6 +135,7 @@
         const local = $('f_local').checked;
         $('f_lportRow').style.display = local ? '' : 'none';
         $('f_lstaleRow').style.display = local ? '' : 'none';
+        $('f_mdayRow').style.display = local ? '' : 'none';
         // 로컬 모드면 이메일/비번 필수 표시 완화
         $('f_emailReq').style.display = local ? 'none' : '';
         $('f_pwReq').style.display = local ? 'none' : '';
@@ -144,6 +151,8 @@
         if (cfg.localMode) {
           cfg.localPort = Number($('f_lport').value) || 5010;
           cfg.localStaleSeconds = Number($('f_lstale').value) || 90;
+          const md = parseInt($('f_mday').value, 10);
+          if (md >= 1 && md <= 31) cfg.meteringDay = md;
         }
         cfg.exposePower = $('f_power').checked;
         const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn;
@@ -159,7 +168,7 @@
       }
       async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증 */ } }
 
-      ['f_email', 'f_password', 'f_lport', 'f_lstale', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing', 'f_cid', 'f_csec']
+      ['f_email', 'f_password', 'f_lport', 'f_lstale', 'f_mday', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing', 'f_cid', 'f_csec']
         .forEach((id) => $(id).addEventListener('input', sync));
       ['f_power', 'f_usage', 'f_outlet', 'f_local'].forEach((id) =>
         $(id).addEventListener('change', () => { refresh(); sync(); }));
