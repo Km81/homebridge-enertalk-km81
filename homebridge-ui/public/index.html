@@ -9,7 +9,8 @@
     .et-row { margin-bottom: 12px; }
     .et-row label { font-size: 0.85rem; font-weight: 500; display: block; margin-bottom: 4px; }
     .et-row .et-hint { color: #8a9099; font-size: 0.76rem; margin-top: 3px; }
-    .et-check { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 0.88rem; }
+    .et-check { display: flex; align-items: center; gap: 8px; margin: 10px 0 6px; font-size: 0.9rem; font-weight: 500; }
+    .et-indent { margin-left: 24px; }
     .et-adv summary { cursor: pointer; color: #6c757d; font-size: 0.85rem; margin: 6px 0; }
   </style>
 </head>
@@ -18,8 +19,8 @@
     <div class="et-title">EnerTalk 설정</div>
     <p class="et-sub">
       에너톡 앱 이메일/비밀번호를 입력하고 하단 <b>SAVE(저장)</b> → Homebridge 재시작 하세요.
-      실시간 전력·당월 사용량이 각각 독립 액세서리로 등록되어 홈 앱에서 이름을 따로 바꿀 수 있습니다.
-      (정상 연결 여부는 재시작 후 <b>Homebridge 로그</b>의 <code>[EnerTalk] 로그인 성공 · 실시간 …W</code> 로 확인됩니다.)
+      추가할 액세서리를 체크하고 이름을 정할 수 있습니다.
+      (정상 연결은 재시작 후 <b>로그</b>의 <code>[EnerTalk] 로그인 성공 · 실시간 …W</code> 로 확인)
     </p>
 
     <div class="et-row">
@@ -30,14 +31,29 @@
       <label for="f_password">에너톡 비밀번호 *</label>
       <input type="password" id="f_password" class="form-control" autocomplete="off">
     </div>
-    <div class="et-row">
-      <label for="f_pname">실시간 전력 센서 이름</label>
+
+    <!-- 실시간 전력 -->
+    <label class="et-check"><input type="checkbox" id="f_power"><span>실시간 전력 액세서리 추가 (W)</span></label>
+    <div class="et-row et-indent" id="f_pnameRow">
+      <label for="f_pname">이름</label>
       <input type="text" id="f_pname" class="form-control" placeholder="실시간 전력">
     </div>
-    <div class="et-row">
-      <label for="f_uname">당월 사용량 센서 이름</label>
+
+    <!-- 당월 사용량 -->
+    <label class="et-check"><input type="checkbox" id="f_usage"><span>당월 사용량 액세서리 추가 (kWh)</span></label>
+    <div class="et-row et-indent" id="f_unameRow">
+      <label for="f_uname">이름</label>
       <input type="text" id="f_uname" class="form-control" placeholder="당월 사용량">
     </div>
+
+    <!-- 옵션 콘센트 -->
+    <label class="et-check"><input type="checkbox" id="f_outlet"><span>Eve 에너지 그래프용 콘센트 추가 (선택 · 동작 없는 On 토글 생김)</span></label>
+    <div class="et-row et-indent" id="f_outletnameRow">
+      <label for="f_name">콘센트 이름</label>
+      <input type="text" id="f_name" class="form-control" placeholder="소비전력">
+    </div>
+
+    <hr>
     <div class="et-row">
       <label for="f_polling">실시간 폴링 주기(초)</label>
       <input type="number" id="f_polling" class="form-control" value="30" min="10" max="3600">
@@ -47,15 +63,6 @@
       <label for="f_billing">당월 사용량 폴링 주기(초)</label>
       <input type="number" id="f_billing" class="form-control" value="300" min="60" max="86400">
       <div class="et-hint">권장 300초.</div>
-    </div>
-
-    <label class="et-check">
-      <input type="checkbox" id="f_outlet">
-      <span>Eve 에너지 그래프용 콘센트 추가(선택) — 홈 앱에 동작 없는 On 토글이 생깁니다</span>
-    </label>
-    <div class="et-row" id="f_outletnameRow" style="display:none;">
-      <label for="f_name">콘센트 액세서리 이름</label>
-      <input type="text" id="f_name" class="form-control" placeholder="소비전력">
     </div>
 
     <details class="et-adv">
@@ -76,43 +83,52 @@
       const PLATFORM = 'EnerTalkKm81';
       const $ = (id) => document.getElementById(id);
 
-      // 기존 설정 로드 → 폼 채우기
+      // 기존 설정 로드
       let cfgs = [];
       try { cfgs = await homebridge.getPluginConfig(); } catch (e) { cfgs = []; }
       const c = (cfgs && cfgs[0]) || { platform: PLATFORM };
       $('f_email').value = c.email || '';
       $('f_password').value = c.password || '';
+      $('f_power').checked = c.exposePower !== false;   // 기본 on
       $('f_pname').value = c.powerSensorName || '';
+      $('f_usage').checked = c.exposeUsage !== false;   // 기본 on
       $('f_uname').value = c.usageSensorName || '';
+      $('f_outlet').checked = c.exposeOutlet === true;  // 기본 off
+      $('f_name').value = c.name || '';
       $('f_polling').value = c.pollingInterval || 30;
       $('f_billing').value = c.billingInterval || 300;
-      $('f_outlet').checked = c.exposeOutlet === true;
-      $('f_name').value = c.name || '';
       $('f_cid').value = c.clientId || '';
       $('f_csec').value = c.clientSecret || '';
 
-      const refreshOutletRow = () => { $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none'; };
-      refreshOutletRow();
+      const refresh = () => {
+        $('f_pnameRow').style.display = $('f_power').checked ? '' : 'none';
+        $('f_unameRow').style.display = $('f_usage').checked ? '' : 'none';
+        $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none';
+      };
+      refresh();
 
-      // 폼 → 플러그인 설정 반영 (하단 SAVE 가 이 값을 저장)
       function collect() {
         const cfg = { platform: PLATFORM };
         cfg.email = $('f_email').value.trim();
         cfg.password = $('f_password').value;
+        cfg.exposePower = $('f_power').checked;
         const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn;
+        cfg.exposeUsage = $('f_usage').checked;
         const un = $('f_uname').value.trim(); if (un) cfg.usageSensorName = un;
-        cfg.pollingInterval = Number($('f_polling').value) || 30;
-        cfg.billingInterval = Number($('f_billing').value) || 300;
         cfg.exposeOutlet = $('f_outlet').checked;
         const nm = $('f_name').value.trim(); if (nm) cfg.name = nm;
+        cfg.pollingInterval = Number($('f_polling').value) || 30;
+        cfg.billingInterval = Number($('f_billing').value) || 300;
         const cid = $('f_cid').value.trim(); if (cid) cfg.clientId = cid;
         const csec = $('f_csec').value; if (csec) cfg.clientSecret = csec;
         return cfg;
       }
-      async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증됨 */ } }
-      ['f_email', 'f_password', 'f_pname', 'f_uname', 'f_polling', 'f_billing', 'f_name', 'f_cid', 'f_csec']
+      async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증 */ } }
+
+      ['f_email', 'f_password', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing', 'f_cid', 'f_csec']
         .forEach((id) => $(id).addEventListener('input', sync));
-      $('f_outlet').addEventListener('change', () => { refreshOutletRow(); sync(); });
+      ['f_power', 'f_usage', 'f_outlet'].forEach((id) =>
+        $(id).addEventListener('change', () => { refresh(); sync(); }));
       await sync();
     })();
   </script>

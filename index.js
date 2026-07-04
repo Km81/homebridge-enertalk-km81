@@ -6,12 +6,10 @@
  * api2.enertalk.com 이 살아있어, 앱 번들의 공개 client 자격증명 + password grant 로
  * 이메일/비밀번호만으로 데이터를 끌어온다.
  *
- * 노출 방식:
- *  - 기본: "실시간 전력" / "당월 사용량" 을 각각 독립 조도센서(lux) 액세서리로 노출한다.
- *      Apple '홈' 앱에서 숫자가 바로 보이고(룩스=값), 각 액세서리 이름을 따로 지정/변경할 수 있다.
- *      각 센서에 Eve 특성(W·V·A / kWh)도 함께 실어 Eve 앱에서도 값이 보인다.
- *  - 옵션(exposeOutlet, 기본 off): Eve 에너지 그래프 UI 를 원하면 Outlet+Eve 액세서리를 추가.
- *      (Outlet 은 스위치 특성 On 이 필수라 홈 앱에 토글이 보이지만, 실제 동작은 없다.)
+ * 노출(각각 켜고/끌 수 있음):
+ *  - 실시간 전력(exposePower, 기본 on): 조도센서(lux=W) + Eve W/V/A + Eve 그래프(fakegato)
+ *  - 당월 사용량(exposeUsage, 기본 on): 조도센서(lux=kWh) + Eve kWh
+ *  - Eve 에너지 콘센트(exposeOutlet, 기본 off): Eve 그래프 UI 용 Outlet(+동작 없는 On 토글)
  */
 
 'use strict';
@@ -38,7 +36,7 @@ class EnerTalkPlatform {
 
     this.Eve = buildEveCharacteristics(this.hap);
 
-    // Eve 그래프용 히스토리 로깅(fakegato-history). 로드 실패해도 플러그인은 값 노출은 계속.
+    // Eve 그래프용 히스토리 로깅(fakegato-history). 로드 실패해도 값 노출은 계속.
     try {
       this.FakeGato = require('fakegato-history')(this.api);
     } catch (e) {
@@ -48,6 +46,10 @@ class EnerTalkPlatform {
 
     this.pollingInterval = Math.max(10, Number(this.config.pollingInterval) || 30);  // 초, 실시간
     this.billingInterval = Math.max(60, Number(this.config.billingInterval) || 300); // 초, 당월 누적
+
+    // 노출 토글 (기본: 실시간·당월 on, 콘센트 off)
+    this.exposePower = this.config.exposePower !== false;
+    this.exposeUsage = this.config.exposeUsage !== false;
     this.exposeOutlet = this.config.exposeOutlet === true;
 
     if (!this.config.email || !this.config.password) {
@@ -103,7 +105,7 @@ class EnerTalkPlatform {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toRegister);
     }
 
-    // seen 에 없는 캐시 액세서리 정리(콘센트 off 로 바꿨거나 이전 구조의 잔재 등)
+    // seen 에 없는 캐시 액세서리 정리(체크 해제/콘센트 off 등)
     for (const [uuid, acc] of this.accessories) {
       if (!seen.has(uuid)) {
         this.log.info('[EnerTalk] 사용하지 않는 액세서리 제거:', acc.displayName);
@@ -141,48 +143,50 @@ class EnerTalkPlatform {
     const powerName = this.config.powerSensorName || '실시간 전력';
     const usageName = this.config.usageSensorName || '당월 사용량';
 
-    // ── 1) 실시간 전력 센서 (독립 액세서리, lux=W) + Eve W/V/A ─────────
-    const pUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:power`);
-    seen.add(pUuid);
-    const pAcc = this._ensureAccessory(pUuid, powerName, toRegister);
-    pAcc.context.siteId = site.id;
-    this._setInfo(pAcc, site, 'EnerTalk 실시간 전력(W)');
-    const powerLux = pAcc.getService(Service.LightSensor) || pAcc.addService(Service.LightSensor, powerName);
-    powerLux.setCharacteristic(Characteristic.Name, powerName);
-    this._ensureCharacteristic(powerLux, this.Eve.CurrentConsumption);
-    this._ensureCharacteristic(powerLux, this.Eve.Voltage);
-    this._ensureCharacteristic(powerLux, this.Eve.ElectricCurrent);
-
-    // Eve 그래프용 히스토리 서비스(실시간 전력 액세서리에 부착) — W 를 시계열로 로깅
+    let powerLux = null;
+    let usageLux = null;
+    let outlet = null;
     let history = null;
-    if (this.FakeGato) {
-      try {
-        history = new this.FakeGato('energy', pAcc, {
-          storage: 'fs',
-          path: this.api.user.storagePath(),
-        });
-      } catch (e) {
-        this.log.warn('[EnerTalk] 히스토리 서비스 생성 실패:', e.message);
+
+    // ── 1) 실시간 전력 센서 (조도센서 lux=W + Eve W/V/A + 그래프) ──────
+    if (this.exposePower) {
+      const pUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:power`);
+      seen.add(pUuid);
+      const pAcc = this._ensureAccessory(pUuid, powerName, toRegister);
+      pAcc.context.siteId = site.id;
+      this._setInfo(pAcc, site, 'EnerTalk 실시간 전력(W)');
+      powerLux = pAcc.getService(Service.LightSensor) || pAcc.addService(Service.LightSensor, powerName);
+      powerLux.setCharacteristic(Characteristic.Name, powerName);
+      this._ensureCharacteristic(powerLux, this.Eve.CurrentConsumption);
+      this._ensureCharacteristic(powerLux, this.Eve.Voltage);
+      this._ensureCharacteristic(powerLux, this.Eve.ElectricCurrent);
+      if (this.FakeGato) {
+        try {
+          history = new this.FakeGato('energy', pAcc, { storage: 'fs', path: this.api.user.storagePath() });
+        } catch (e) {
+          this.log.warn('[EnerTalk] 히스토리 서비스 생성 실패:', e.message);
+        }
       }
     }
 
-    // ── 2) 당월 사용량 센서 (독립 액세서리, lux=kWh) + Eve kWh ─────────
-    const uUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:usage`);
-    seen.add(uUuid);
-    const uAcc = this._ensureAccessory(uUuid, usageName, toRegister);
-    uAcc.context.siteId = site.id;
-    this._setInfo(uAcc, site, 'EnerTalk 당월 사용량(kWh)');
-    const usageLux = uAcc.getService(Service.LightSensor) || uAcc.addService(Service.LightSensor, usageName);
-    usageLux.setCharacteristic(Characteristic.Name, usageName);
-    this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
+    // ── 2) 당월 사용량 센서 (조도센서 lux=kWh + Eve kWh) ───────────────
+    if (this.exposeUsage) {
+      const uUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:usage`);
+      seen.add(uUuid);
+      const uAcc = this._ensureAccessory(uUuid, usageName, toRegister);
+      uAcc.context.siteId = site.id;
+      this._setInfo(uAcc, site, 'EnerTalk 당월 사용량(kWh)');
+      usageLux = uAcc.getService(Service.LightSensor) || uAcc.addService(Service.LightSensor, usageName);
+      usageLux.setCharacteristic(Characteristic.Name, usageName);
+      this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
+    }
 
-    // ── 3) 옵션: Eve 에너지 그래프용 Outlet(+스위치) — 기본 off ─────────
-    let outlet = null;
-    const outletUuid = uuidGen(`${PLUGIN_NAME}:${site.id}`);
+    // ── 3) 옵션: Eve 에너지 그래프용 Outlet(+스위치) ──────────────────
     if (this.exposeOutlet) {
       const outletName = this.config.name || site.name || '소비전력';
-      seen.add(outletUuid);
-      const oAcc = this._ensureAccessory(outletUuid, outletName, toRegister);
+      const oUuid = uuidGen(`${PLUGIN_NAME}:${site.id}`);
+      seen.add(oUuid);
+      const oAcc = this._ensureAccessory(oUuid, outletName, toRegister);
       oAcc.context.siteId = site.id;
       this._setInfo(oAcc, site, 'EnerTalk Energy Meter');
       outlet = oAcc.getService(Service.Outlet) || oAcc.addService(Service.Outlet, outletName);
@@ -198,22 +202,31 @@ class EnerTalkPlatform {
       this._ensureCharacteristic(outlet, this.Eve.Voltage);
       this._ensureCharacteristic(outlet, this.Eve.ElectricCurrent);
     }
-    // exposeOutlet off 면 outletUuid 를 seen 에 안 넣었으니 _start 정리 단계에서 제거된다.
 
-    // ── 폴링 ──────────────────────────────────────────────────────
+    // ── 폴링 (필요한 것만) ─────────────────────────────────────────
     this._stopTimers(site.id);
     const ctx = { site, powerLux, usageLux, outlet, history, timers: [], loggedRealtime: false, loggedBilling: false };
     this.contexts.set(site.id, ctx);
+
+    const needRealtime = !!(powerLux || outlet);
+    const needBilling = !!(usageLux || outlet);
 
     const pollRealtime = () => this._pollRealtime(site.id).catch((e) =>
       this.log.warn('[EnerTalk] realtime 폴링 오류:', e.message));
     const pollBilling = () => this._pollBilling(site.id).catch((e) =>
       this.log.warn('[EnerTalk] billing 폴링 오류:', e.message));
 
-    pollRealtime();
-    pollBilling();
-    ctx.timers.push(setInterval(pollRealtime, this.pollingInterval * 1000));
-    ctx.timers.push(setInterval(pollBilling, this.billingInterval * 1000));
+    if (needRealtime) {
+      pollRealtime();
+      ctx.timers.push(setInterval(pollRealtime, this.pollingInterval * 1000));
+    }
+    if (needBilling) {
+      pollBilling();
+      ctx.timers.push(setInterval(pollBilling, this.billingInterval * 1000));
+    }
+    if (!needRealtime && !needBilling) {
+      this.log.warn(`[EnerTalk] site ${site.id}: 노출할 액세서리가 하나도 선택되지 않았습니다.`);
+    }
   }
 
   _ensureCharacteristic(service, Ctor) {
@@ -230,20 +243,19 @@ class EnerTalkPlatform {
     const volts = EnerTalkApi.toVolts(data.voltage);
     const amps = EnerTalkApi.toAmps(data.current);
 
-    // 실시간 전력 센서: 홈 앱용 lux + Eve W/V/A
-    ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(watts));
-    ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
-    ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
-    ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
-
+    if (ctx.powerLux) {
+      ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(watts));
+      ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
+      ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
+      ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
+    }
     if (ctx.outlet) {
       ctx.outlet.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(watts, 1));
       ctx.outlet.getCharacteristic(this.Eve.Voltage).updateValue(round(volts, 1));
       ctx.outlet.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(amps, 2));
     }
-
     if (ctx.history) {
-      try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 로깅 실패 무시 */ }
+      try { ctx.history.addEntry({ time: Math.round(Date.now() / 1000), power: round(watts, 1) }); } catch (e) { /* 무시 */ }
     }
 
     const msg = `[EnerTalk] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A`;
@@ -257,9 +269,10 @@ class EnerTalkPlatform {
     const data = await this.client.getBilling(ctx.site.id);
 
     const kwh = EnerTalkApi.toKwh(data.usage);
-    ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
-    ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
-
+    if (ctx.usageLux) {
+      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    }
     if (ctx.outlet) {
       ctx.outlet.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
     }
