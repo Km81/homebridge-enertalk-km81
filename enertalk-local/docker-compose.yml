@@ -17,6 +17,9 @@ services:
       # GATEWAY_IP: "192.168.1.1"
       # IFACE: "eth0"
       # SPOOF_INTERVAL: "2"
+    volumes:
+      # redirect.py 를 호스트에서 마운트 → 파일만 고치고 재시작하면 반영(재빌드 불필요)
+      - ./redirect.py:/redirect.py:ro
     logging:
       driver: json-file
       options:
