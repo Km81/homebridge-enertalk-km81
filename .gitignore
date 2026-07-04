@@ -1,0 +1,12 @@
+node_modules
+*.log
+npm-debug.log*
+.npm
+coverage
+.nyc_output
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+package-lock.json

@@ -1,0 +1,77 @@
+{
+  "pluginAlias": "EnerTalkKm81",
+  "pluginType": "platform",
+  "singular": true,
+  "customUi": true,
+  "headerDisplay": "EnerTalk(Encored) 전력 미터를 HomeKit 으로 노출합니다. 에너톡 앱 로그인 이메일/비밀번호만 있으면 됩니다. 실시간 소비전력(W)과 당월 누적 사용량(kWh)은 **Eve 앱**에서 그래프까지 확인할 수 있고, 홈 앱 기본화면에서 숫자를 보고 싶으면 아래 '조도센서 노출'을 켜세요.",
+  "footerDisplay": "developer.enertalk.com 이 폐쇄돼도 auth2/api2 는 동작합니다. client_id/secret 은 비워두면 앱 기본값을 사용합니다.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "액세서리 이름",
+        "type": "string",
+        "default": "EnerTalk",
+        "description": "비워두면 site 이름(예: F3000DB8)을 사용합니다."
+      },
+      "email": {
+        "title": "에너톡 이메일",
+        "type": "string",
+        "required": true,
+        "format": "email"
+      },
+      "password": {
+        "title": "에너톡 비밀번호",
+        "type": "string",
+        "required": true,
+        "x-schema-form": { "type": "password" }
+      },
+      "pollingInterval": {
+        "title": "실시간 폴링 주기(초)",
+        "type": "integer",
+        "default": 30,
+        "minimum": 10,
+        "maximum": 3600,
+        "description": "실시간 소비전력(W) 조회 주기. 너무 짧게 두지 마세요(권장 30초)."
+      },
+      "billingInterval": {
+        "title": "당월 사용량 폴링 주기(초)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 60,
+        "maximum": 86400,
+        "description": "당월 누적 사용량(kWh)/요금 조회 주기(권장 300초)."
+      },
+      "exposeLightSensors": {
+        "title": "조도센서(lux) 미러 노출 — 홈 앱 기본화면용",
+        "type": "boolean",
+        "default": false,
+        "description": "켜면 실시간 W 와 당월 kWh 를 조도센서 값(lux)으로도 노출해 Apple '홈' 앱에서 숫자를 볼 수 있습니다. Eve 앱만 쓰면 꺼두어도 됩니다."
+      },
+      "clientId": {
+        "title": "client_id (고급, 선택)",
+        "type": "string",
+        "description": "비워두면 앱 기본 client_id 사용."
+      },
+      "clientSecret": {
+        "title": "client_secret (고급, 선택)",
+        "type": "string",
+        "x-schema-form": { "type": "password" },
+        "description": "비워두면 앱 기본 client_secret 사용."
+      }
+    },
+    "required": ["email", "password"]
+  },
+  "layout": [
+    "name",
+    "email",
+    "password",
+    {
+      "type": "fieldset",
+      "title": "고급 설정",
+      "expandable": true,
+      "expanded": false,
+      "items": ["pollingInterval", "billingInterval", "exposeLightSensors", "clientId", "clientSecret"]
+    }
+  ]
+}

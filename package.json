@@ -1,0 +1,41 @@
+{
+  "name": "homebridge-enertalk-km81",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for EnerTalk (Encored) energy meters — realtime power (W) and monthly usage (kWh) via the EnerTalk cloud API, exposed with Eve energy characteristics.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.15.0",
+    "homebridge": ">=1.6.0"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "enertalk",
+    "encored",
+    "energy",
+    "power",
+    "electricity",
+    "eve",
+    "homekit"
+  ],
+  "author": "Km81",
+  "license": "MIT",
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "^2.0.0"
+  },
+  "files": [
+    "index.js",
+    "config.schema.json",
+    "lib/",
+    "homebridge-ui/",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Km81/homebridge-enertalk-km81.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Km81/homebridge-enertalk-km81/issues"
+  },
+  "homepage": "https://github.com/Km81/homebridge-enertalk-km81#readme"
+}

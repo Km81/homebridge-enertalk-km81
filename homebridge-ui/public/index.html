@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <style>
+    .et-card { border: 1px solid #d9dde2; border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+    .et-title { font-weight: 600; margin-bottom: 6px; }
+    .et-sub { color: #6c757d; font-size: 0.83rem; line-height: 1.5; margin: 0 0 12px 0; }
+    .et-result { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 0.88rem; line-height: 1.5; display: none; }
+    .et-result.show { display: block; }
+    .et-result.ok   { background: #e6f4ea; color: #1e7e34; border: 1px solid #bfe3c9; }
+    .et-result.none { background: #fdecea; color: #b02a37; border: 1px solid #f3c4c0; }
+    .et-result.wait { background: #fff6e5; color: #946200; border: 1px solid #f0dcb0; }
+  </style>
+</head>
+<body>
+  <div class="et-card">
+    <div class="et-title">EnerTalk 연결 테스트</div>
+    <p class="et-sub">
+      아래 폼에 <b>에너톡 앱 이메일/비밀번호</b>를 입력한 뒤 <b>연결 테스트</b>를 누르면,
+      로그인·사이트 조회·현재 실시간값(W/V/A)·당월 누적(kWh)을 저장 전에 바로 확인합니다.
+      <br>사용하는 client_id/secret 은 앱 공개값이라 비워두면 됩니다.
+    </p>
+    <button id="etTestBtn" class="btn btn-primary btn-sm" type="button">연결 테스트 / 사이트 조회</button>
+    <div id="etResult" class="et-result"></div>
+  </div>
+
+  <script>
+    (async () => {
+      // 표준 설정 폼(이메일/비밀번호/주기 등)을 그대로 렌더링
+      homebridge.showSchemaForm();
+
+      const resultEl = document.getElementById('etResult');
+      const setResult = (cls, html) => {
+        resultEl.className = 'et-result show ' + cls;
+        resultEl.innerHTML = html;
+      };
+
+      document.getElementById('etTestBtn').addEventListener('click', async () => {
+        const cfgs = await homebridge.getPluginConfig();
+        const c = (cfgs && cfgs[0]) || {};
+        if (!c.email || !c.password) {
+          setResult('none', '먼저 위 폼에 이메일/비밀번호를 입력하세요.');
+          return;
+        }
+        homebridge.showSpinner();
+        setResult('wait', '로그인 및 조회 중…');
+        try {
+          const r = await homebridge.request('/test', {
+            email: c.email,
+            password: c.password,
+            clientId: c.clientId,
+            clientSecret: c.clientSecret,
+          });
+          if (!r || !r.ok) {
+            setResult('none', '실패: ' + ((r && r.error) || '알 수 없는 오류'));
+          } else {
+            let html = '<b>연결 성공 ✓</b><br>사이트 ' + r.sites.length + '개';
+            if (r.sites.length) {
+              html += ': ' + r.sites.map((s) => s.name + ' (' + String(s.id).slice(0, 8) + '…)').join(', ');
+            }
+            if (r.realtime) {
+              html += '<br>실시간: <b>' + r.realtime.watts + ' W</b> / ' + r.realtime.volts + ' V / ' + r.realtime.amps + ' A';
+            }
+            if (r.billing) {
+              html += '<br>당월 누적: <b>' + r.billing.kwh + ' kWh</b>'
+                + (r.billing.charge != null ? (' / ' + r.billing.charge + '원') : '');
+            }
+            setResult('ok', html);
+            homebridge.toast.success('EnerTalk 연결 성공');
+          }
+        } catch (e) {
+          setResult('none', '오류: ' + (e && e.message ? e.message : e));
+        } finally {
+          homebridge.hideSpinner();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
