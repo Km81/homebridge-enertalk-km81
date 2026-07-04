@@ -1,0 +1,24 @@
+services:
+  enertalk-local:
+    build: .
+    image: enertalk-local:latest
+    container_name: enertalk-local
+    restart: always
+    # 호스트 네트워크 + 권한: ARP 전송(raw socket) 과 호스트 iptables 수정을 위해 필요
+    network_mode: host
+    privileged: true
+    environment:
+      # ── 필수: 대상 에너톡 기기 ──
+      DEVICE_IP: "192.168.1.108"
+      DEVICE_MAC: "84:72:07:24:0d:c5"
+      # ── 플러그인 로컬 서버 포트(기본 5010) ──
+      LOCAL_PORT: "5010"
+      # ── 보통 자동감지되지만, 안되면 주석 해제해서 지정 ──
+      # GATEWAY_IP: "192.168.1.1"
+      # IFACE: "eth0"
+      # SPOOF_INTERVAL: "2"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
