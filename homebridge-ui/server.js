@@ -28,12 +28,13 @@ class UiServer extends HomebridgePluginUiServer {
   }
 
   async handleTest(payload) {
-    const EnerTalkApi = require('../lib/EnerTalkApi.js');
     const { email, password, clientId, clientSecret } = payload || {};
     if (!email || !password) {
       return { ok: false, error: '이메일과 비밀번호를 입력하세요.' };
     }
     try {
+      // require 실패까지 포함해 어떤 예외든 항상 응답을 돌려준다(클라이언트 무한대기 방지).
+      const EnerTalkApi = require('../lib/EnerTalkApi.js');
       const client = new EnerTalkApi({ email, password, clientId, clientSecret });
       await client.login();
 
