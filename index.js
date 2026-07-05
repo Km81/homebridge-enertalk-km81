@@ -86,6 +86,7 @@ class EnerTalkPlatform {
         this._stopped = true;
         if (this._startRetryTimer) { clearTimeout(this._startRetryTimer); this._startRetryTimer = null; }
         if (this._localRetryTimer) { clearTimeout(this._localRetryTimer); this._localRetryTimer = null; }
+        if (this._backfillTimer) { clearInterval(this._backfillTimer); this._backfillTimer = null; }
         this._stopAllTimers();
         if (this.localServer) { try { this.localServer.stop(); } catch (e) { /* 무시 */ } }
       });
@@ -110,6 +111,7 @@ class EnerTalkPlatform {
       this._startRetryTimer = setTimeout(() => this._start(attempt + 1), delay);
       return;
     }
+    if (this._stopped) return; // await 도중 셧다운되면 타이머/등록을 만들지 않음
     if (!Array.isArray(sites) || sites.length === 0) {
       this.log.error('[EnerTalk] 연결된 site 가 없습니다.');
       return;
@@ -134,6 +136,21 @@ class EnerTalkPlatform {
         this.accessories.delete(uuid);
       }
     }
+
+    // 설정 화면 '사용량 보기'(월별·일별)를 클라우드 모드에서도 채운다. UI 는 로컬 파일만 읽으므로,
+    // 여기서 클라우드 히스토리를 그 파일에 backfill + 당월/오늘 현재값을 기록한다(부팅 1회 + 12시간).
+    this._storageDir = '.';
+    try { this._storageDir = this.api.user.storagePath(); } catch (e) { /* 무시 */ }
+    this.monthly = new MonthlyTracker({
+      storageDir: this._storageDir,
+      meteringDay: Number(this.config.meteringDay) || null,
+      log: this.log,
+    });
+    this._billingSiteId = sites[0].id;
+    const backfill = () => this._backfillHistoryFromCloud().catch((e) =>
+      this.log.debug('[EnerTalk] 히스토리 backfill 오류:', e.message));
+    backfill();
+    this._backfillTimer = setInterval(backfill, 12 * 3600 * 1000);
   }
 
   _ensureAccessory(uuid, name, toRegister) {
@@ -299,6 +316,8 @@ class EnerTalkPlatform {
       if (ctx.outlet) {
         ctx.outlet.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
       }
+      // 설정 화면 '사용량 보기' 당월(현재까지)용 — 클라우드 모드는 기기 카운터가 없으므로 billing 값 사용.
+      if (this.monthly) this.monthly.setCloudCurrent(Math.round(kwh * 10) / 10, null);
     }
 
     const msg = `[EnerTalk] 당월 ${round(kwh, 2)}kWh`;
@@ -343,7 +362,8 @@ class EnerTalkPlatform {
     }
 
     // 4) 클라우드 병행(billing 보정 + 실시간 폴백) — 실패해도 재시도로 세션 내내 살림(#5)
-    if (this.client) this._ensureCloudCompanion(0);
+    if (this.client) this._ensureCloudCompanion(0)
+      .catch((e) => this.log.error('[EnerTalk][local] 클라우드 병행 초기화 실패:', e && e.message));
     else this.log.info('[EnerTalk][local] 클라우드 없음 — 완전 로컬 (당월=기기 카운터, 검침일=설정값 또는 기본 1일, 폴백 없음).');
   }
 
@@ -357,10 +377,11 @@ class EnerTalkPlatform {
     } catch (e) {
       const delay = Math.min(600, 30 * Math.pow(2, attempt)) * 1000;
       this.log.warn(`[EnerTalk][local] 클라우드 site 조회 실패 — ${Math.round(delay / 1000)}초 후 재시도(로컬은 계속 동작): ${e.message}`);
-      this._localRetryTimer = setTimeout(() => this._ensureCloudCompanion(attempt + 1), delay);
+      this._localRetryTimer = setTimeout(() => this._ensureCloudCompanion(attempt + 1)
+        .catch((err) => this.log.debug('[EnerTalk][local] 재시도 오류:', err && err.message)), delay);
       return;
     }
-    if (!siteId) return;
+    if (this._stopped || !siteId) return; // await 도중 셧다운이면 타이머 생성 금지
     this._billingSiteId = siteId;
     this._saveSiteId(siteId);
 
@@ -405,6 +426,9 @@ class EnerTalkPlatform {
         kwh: Math.round((it.usage || 0) / 1e6 * 100) / 100,
       }));
       this.monthly.backfillDaily(entries, todayStr);
+      // 클라우드 모드(기기 카운터 없음)용 오늘(현재까지) 값 — 로컬 모드에선 카운터 산출이 우선.
+      const t = entries.find((e) => e.date === todayStr);
+      if (t) this.monthly.setCloudCurrent(null, t.kwh);
     }
 
     const monp = await this.client.getPeriodic(sid, 'month', now - 400 * 86400000, now).catch(() => null);

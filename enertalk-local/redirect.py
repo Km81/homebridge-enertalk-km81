@@ -35,6 +35,11 @@ def log(*a):
 
 DEVICE_IP = os.environ.get("DEVICE_IP")
 DEVICE_MAC = (os.environ.get("DEVICE_MAC") or "").lower() or None
+# CLOUD_PORT = 기기가 접속하는 목적지 포트(eddie-ext.encoredtech.com:5010, 기기 고정).
+# LOCAL_PORT = 우리 플러그인 로컬 TLS 서버 포트. 둘을 분리해야 LOCAL_PORT 를 바꿔도
+# REDIRECT 매칭(--dport)이 깨지지 않는다. (예전엔 --dport 를 LOCAL_PORT 로 잡아,
+# LOCAL_PORT 변경 시 기기 트래픽(:5010)과 안 맞아 리다이렉트가 조용히 전부 실패했음.)
+CLOUD_PORT = int(os.environ.get("CLOUD_PORT", "5010"))
 LOCAL_PORT = int(os.environ.get("LOCAL_PORT", "5010"))
 GATEWAY_IP = os.environ.get("GATEWAY_IP") or None
 GATEWAY_MAC = None
@@ -80,10 +85,10 @@ def resolve_mac(ip, tries=3):
 
 
 log("iface=%s my_mac=%s" % (IFACE, MY_MAC))
-log("device=%s gateway=%s port=%d" % (DEVICE_IP, GATEWAY_IP, LOCAL_PORT))
+log("device=%s gateway=%s cloud_port=%d → local_port=%d" % (DEVICE_IP, GATEWAY_IP, CLOUD_PORT, LOCAL_PORT))
 
 RULE = "PREROUTING -s %s -p tcp --dport %d -j REDIRECT --to-ports %d" % (
-    DEVICE_IP, LOCAL_PORT, LOCAL_PORT)
+    DEVICE_IP, CLOUD_PORT, LOCAL_PORT)
 
 
 def resolve_macs_blocking():
@@ -124,7 +129,7 @@ def del_iptables():
 
 def flush_conntrack():
     """기기의 기존 TCP 연결 conntrack 을 비워 재접속을 유도(기기 재부팅 없이 즉시 잡힘 — #22)."""
-    r = sh("conntrack -D -s %s -p tcp --dport %d 2>/dev/null" % (DEVICE_IP, LOCAL_PORT))
+    r = sh("conntrack -D -s %s -p tcp --dport %d 2>/dev/null" % (DEVICE_IP, CLOUD_PORT))
     if r.returncode == 0:
         log("conntrack flush — 기기 재접속 유도")
 

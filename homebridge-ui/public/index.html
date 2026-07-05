@@ -64,6 +64,9 @@
       <label for="f_password">에너톡 비밀번호 <span id="f_pwReq">*</span></label>
       <input type="password" id="f_password" class="form-control" autocomplete="off">
     </div>
+    <div id="f_credWarn" style="display:none; color:#c0392b; font-size:0.82rem; margin:-4px 0 10px; padding:6px 8px; border:1px solid #f0c0c0; border-radius:6px; background:#fdf3f3;">
+      ⚠ 클라우드 모드에서는 이메일/비밀번호가 필요합니다. 비우고 저장하면 액세서리가 하나도 안 생기고 로그에만 오류가 남습니다.
+    </div>
 
     <!-- 실시간 전력 -->
     <label class="et-check"><input type="checkbox" id="f_power"><span>실시간 전력 액세서리 추가 (W)</span></label>
@@ -136,6 +139,9 @@
         $('f_emailReq').style.display = local ? 'none' : '';
         $('f_pwReq').style.display = local ? 'none' : '';
         $('f_emailHint').style.display = local ? '' : 'none';
+        // 클라우드 모드인데 자격증명이 비어 있으면 경고(저장은 되지만 액세서리 0개).
+        const noCreds = !$('f_email').value.trim() || !$('f_password').value;
+        $('f_credWarn').style.display = (!local && noCreds) ? '' : 'none';
       };
       refresh();
 
@@ -164,6 +170,7 @@
 
       ['f_email', 'f_password', 'f_lport', 'f_lstale', 'f_mday', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing']
         .forEach((id) => $(id).addEventListener('input', sync));
+      ['f_email', 'f_password'].forEach((id) => $(id).addEventListener('input', refresh)); // 경고 실시간 갱신
       ['f_power', 'f_usage', 'f_outlet', 'f_local'].forEach((id) =>
         $(id).addEventListener('change', () => { refresh(); sync(); }));
 
