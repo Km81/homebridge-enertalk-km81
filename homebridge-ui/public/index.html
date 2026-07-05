@@ -92,9 +92,15 @@
     <hr>
     <div class="et-row">
       <button type="button" id="f_monthlyBtn" class="btn btn-primary" style="width:100%;">월별 사용량 (최근 1년) 보기</button>
-      <div class="et-hint">클라우드에서 최근 1년 월별 사용량과 당월(현재까지 누적)을 불러옵니다. (이메일/비밀번호 필요)</div>
+      <div class="et-hint">최근 1년 월별 사용량과 당월(현재까지 누적). 로컬 기록 우선, 없는 달은 클라우드로 보강.</div>
     </div>
     <div id="f_monthlyOut" style="display:none; margin-top:6px;"></div>
+
+    <div class="et-row">
+      <button type="button" id="f_dailyBtn" class="btn btn-primary" style="width:100%;">일별 사용량 (최근 30일) 보기</button>
+      <div class="et-hint">최근 일별 사용량과 오늘(현재까지 누적). 로컬 기록 우선, 없는 날은 클라우드로 보강. 로컬 모드로 두면 매일 자정마다 하루씩 자동으로 쌓입니다.</div>
+    </div>
+    <div id="f_dailyOut" style="display:none; margin-top:6px;"></div>
 
     <details class="et-adv">
       <summary>고급 (client_id / secret — 보통 비워둠)</summary>
@@ -213,6 +219,40 @@
           monthlyOut.innerHTML = `<div style="color:#c0392b;">조회 실패: ${(e && e.message) || e}</div>`;
         } finally {
           monthlyBtn.disabled = false; monthlyBtn.textContent = label;
+        }
+      });
+
+      // ── 일별 사용량(최근 30일) 조회 ─────────────────────────────
+      const dailyBtn = $('f_dailyBtn'), dailyOut = $('f_dailyOut');
+      dailyBtn.addEventListener('click', async () => {
+        dailyBtn.disabled = true; const label = dailyBtn.textContent; dailyBtn.textContent = '불러오는 중…';
+        dailyOut.style.display = ''; dailyOut.innerHTML = '<div style="color:#6c757d;">조회 중…</div>';
+        try {
+          const res = await homebridge.request('/daily', {
+            email: $('f_email').value.trim(), password: $('f_password').value,
+            clientId: $('f_cid').value.trim(), clientSecret: $('f_csec').value,
+          });
+          const days = (res && res.days) || [];
+          const today = res && res.today;
+          const fmt = (n) => (n == null ? '-' : Number(n).toLocaleString());
+          let html = '<table style="width:100%; border-collapse:collapse; font-size:0.86rem;">';
+          html += '<tr style="border-bottom:1px solid #ddd; color:#6c757d;"><th style="text-align:left; padding:4px;">일자</th><th style="text-align:right; padding:4px;">사용량(kWh)</th></tr>';
+          if (today) {
+            html += `<tr style="background:#eef6ff;"><td style="padding:4px;"><b>오늘(현재까지)</b></td><td style="text-align:right; padding:4px;"><b>${fmt(today.kwh)}</b></td></tr>`;
+          }
+          days.slice().reverse().forEach((d) => {
+            html += `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${d.date}</td><td style="text-align:right; padding:4px;">${fmt(d.kwh)}</td></tr>`;
+          });
+          html += '</table>';
+          if (!days.length) {
+            html += '<div style="color:#8a9099; font-size:0.8rem; margin-top:6px;">아직 기록된 과거 일자가 없습니다. 로컬 모드로 두면 매일 자정마다 하루씩 자동으로 쌓입니다.</div>';
+          }
+          if (!days.length && !today) html = '<div style="color:#6c757d;">데이터가 없습니다.</div>';
+          dailyOut.innerHTML = html;
+        } catch (e) {
+          dailyOut.innerHTML = `<div style="color:#c0392b;">조회 실패: ${(e && e.message) || e}</div>`;
+        } finally {
+          dailyBtn.disabled = false; dailyBtn.textContent = label;
         }
       });
 
