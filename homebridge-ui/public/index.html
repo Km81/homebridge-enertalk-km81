@@ -178,11 +178,13 @@
       const usageBtn = $('f_usageBtn'), usageOut = $('f_usageOut');
       const fmt = (n) => (n == null ? '-' : Number(n).toLocaleString());
 
-      // 라벨 형식: 월 "2026-05" → "26년 5월", 일 "2026-07-03" → "7월 3일"
+      // 라벨 형식: 월 "2026-05" → "26년 5월", 일 "2026-07-03" → "7월 3일".
+      // 숫자를 고정폭(2ch) 우측정렬해 "년/월/일" 글자가 행마다 세로로 정렬되게 한다.
+      const numCell = (n) => `<span style="display:inline-block; min-width:2ch; text-align:right;">${n}</span>`;
       const fmtLabel = (key, v) => {
         const p = String(v).split('-');
-        if (key === 'month' && p.length >= 2) return `${p[0].slice(2)}년 ${Number(p[1])}월`;
-        if (key === 'date' && p.length >= 3) return `${Number(p[1])}월 ${Number(p[2])}일`;
+        if (key === 'month' && p.length >= 2) return `${p[0].slice(2)}년 ${numCell(Number(p[1]))}월`;
+        if (key === 'date' && p.length >= 3) return `${numCell(Number(p[1]))}월 ${numCell(Number(p[2]))}일`;
         return v;
       };
 
