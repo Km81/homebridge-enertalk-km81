@@ -548,7 +548,10 @@ class EnerTalkPlatform {
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(클라우드 없이도 동작).
     if (r.energy_mWh != null) {
       ctx.lastCounter_mWh = r.energy_mWh;
-      if (this.monthly) this.monthly.recordCounter(r.energy_mWh, ctx.lastLocalMs); // 재시작 대비 영속(~60초 throttle)
+      if (this.monthly) {
+        this.monthly.recordCounter(r.energy_mWh, ctx.lastLocalMs); // 재시작 대비 영속(~60초 throttle)
+        this.monthly.recordDaily(r.energy_mWh, ctx.lastLocalMs);   // 일별 사용량 로컬 기록(KST 자정 경계)
+      }
       // 세션당 1회: 카운터+클라우드 billing 둘 다 확보되면 정확히 재보정(오래된 기준선 치유).
       if (this.client && !ctx.calibrated && ctx.lastCloudBilling && this.monthly) {
         this.monthly.learnFromCloud(r.energy_mWh, ctx.lastCloudBilling.usage, ctx.lastCloudBilling.start, Date.now());
