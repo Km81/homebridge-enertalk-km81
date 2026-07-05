@@ -178,6 +178,14 @@
       const usageBtn = $('f_usageBtn'), usageOut = $('f_usageOut');
       const fmt = (n) => (n == null ? '-' : Number(n).toLocaleString());
 
+      // 라벨 형식: 월 "2026-05" → "26년 5월", 일 "2026-07-03" → "7월 3일"
+      const fmtLabel = (key, v) => {
+        const p = String(v).split('-');
+        if (key === 'month' && p.length >= 2) return `${p[0].slice(2)}년 ${Number(p[1])}월`;
+        if (key === 'date' && p.length >= 3) return `${Number(p[1])}월 ${Number(p[2])}일`;
+        return v;
+      };
+
       // 한 쪽 표(월별/일별 공통) 생성. rows: [{[key], kwh}], cur: {kwh}|null
       function usageTable(title, headLabel, key, rows, curLabel, cur, emptyMsg) {
         let h = '<div style="flex:1 1 240px; min-width:220px;">';
@@ -186,7 +194,7 @@
         h += `<tr style="border-bottom:1px solid #ddd; color:#6c757d;"><th style="text-align:left; padding:4px;">${headLabel}</th><th style="text-align:right; padding:4px;">kWh</th></tr>`;
         if (cur) h += `<tr style="background:#eef6ff;"><td style="padding:4px;"><b>${curLabel}</b></td><td style="text-align:right; padding:4px;"><b>${fmt(cur.kwh)}</b></td></tr>`;
         rows.slice().reverse().forEach((r) => {
-          h += `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${r[key]}</td><td style="text-align:right; padding:4px;">${fmt(r.kwh)}</td></tr>`;
+          h += `<tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:4px;">${fmtLabel(key, r[key])}</td><td style="text-align:right; padding:4px;">${fmt(r.kwh)}</td></tr>`;
         });
         h += '</table>';
         if (!rows.length) h += `<div style="color:#8a9099; font-size:0.76rem; margin-top:6px;">${emptyMsg}</div>`;
