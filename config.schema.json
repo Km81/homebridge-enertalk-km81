@@ -4,7 +4,7 @@
   "singular": true,
   "customUi": true,
   "headerDisplay": "EnerTalk(Encored) 전력 미터를 HomeKit 으로 노출합니다(read-only). **클라우드 모드**(에너톡 이메일/비밀번호로 api2 조회) 또는 **로컬 모드**(기기를 클라우드 대신 이 호스트로 직접 받음, DNS 리다이렉트 필요)로 동작합니다. '실시간 전력'과 '당월 사용량'을 각각 켜고/끌 수 있고, 켜면 이름을 지정할 수 있습니다. 각 센서는 조도센서(lux) 로 홈 앱에 숫자가 뜨고, Eve 특성(W/kWh/V/A)+그래프도 함께 제공됩니다.",
-  "footerDisplay": "로컬 모드: 라우터에서 eddie-ext.encoredtech.com 을 이 홈브릿지 호스트 IP 로 돌리면 기기가 클라우드 대신 여기로 붙습니다(클라우드가 죽어도 동작). 클라우드 모드: developer.enertalk.com 이 폐쇄돼도 auth2/api2 는 동작합니다. client_id/secret 은 비워두면 앱 기본값을 사용합니다.",
+  "footerDisplay": "로컬 모드: 라우터에서 eddie-ext.encoredtech.com 을 이 홈브릿지 호스트 IP 로 돌리면 기기가 클라우드 대신 여기로 붙습니다(클라우드가 죽어도 동작). 클라우드 모드: developer.enertalk.com 이 폐쇄돼도 auth2/api2 는 동작합니다.",
   "schema": {
     "type": "object",
     "properties": {
@@ -102,15 +102,6 @@
         "type": "string",
         "default": "소비전력",
         "condition": { "functionBody": "return model.exposeOutlet === true;" }
-      },
-      "clientId": {
-        "title": "client_id (고급, 선택)",
-        "type": "string"
-      },
-      "clientSecret": {
-        "title": "client_secret (고급, 선택)",
-        "type": "string",
-        "x-schema-form": { "type": "password" }
       }
     }
   }
