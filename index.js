@@ -221,7 +221,7 @@ class EnerTalkPlatform {
 
     // ── 3) 옵션: Eve 에너지 그래프용 Outlet(+스위치) ──────────────────
     if (this.exposeOutlet) {
-      const outletName = this.config.name || site.name || '소비전력';
+      const outletName = this.config.outletName || site.name || '소비전력';
       const oUuid = uuidGen(`${PLUGIN_NAME}:${site.id}`);
       seen.add(oUuid);
       const oAcc = this._ensureAccessory(oUuid, outletName, toRegister);

@@ -8,6 +8,12 @@
   "schema": {
     "type": "object",
     "properties": {
+      "name": {
+        "title": "플러그인/로그 이름",
+        "type": "string",
+        "default": "EnerTalkKm81",
+        "description": "Homebridge 로그와 Config UI X의 'Plugin Logs' 필터에 쓰이는 라벨입니다. 이 값이 로그 앞 [대괄호] 에 표시되고, Plugin Logs 는 이 이름으로 로그를 걸러 보여줍니다. 비우면 로그가 Plugin Logs 에서 안 보일 수 있습니다."
+      },
       "email": {
         "title": "에너톡 이메일 (클라우드 모드)",
         "type": "string",
@@ -97,7 +103,7 @@
         "default": false,
         "description": "Eve 에너지 그래프 UI 용 Outlet. On 스위치가 필수라 홈 앱에 토글이 보이지만 동작은 없습니다. 보통 꺼둡니다."
       },
-      "name": {
+      "outletName": {
         "title": "콘센트 액세서리 이름",
         "type": "string",
         "default": "소비전력",
