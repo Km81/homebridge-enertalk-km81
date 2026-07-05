@@ -206,7 +206,7 @@
         reloadBtn.style.display = 'none';
         usageOut.style.display = ''; usageOut.innerHTML = '<div style="color:#6c757d;">로컬 기록 조회 중…</div>';
         try {
-          const res = await reqT('/usage', {}, 8000);
+          const res = await reqT('/usage', {}, 4000);
           const mres = (res && res.monthly) || {};
           const dres = (res && res.daily) || {};
           const months = mres.months || [];
