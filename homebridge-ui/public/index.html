@@ -26,6 +26,7 @@
     <!-- 사용량 조회(통합) -->
     <div class="et-row">
       <button type="button" id="f_usageBtn" class="btn btn-primary" style="width:100%;">사용량 보기 (월별 · 일별)</button>
+      <button type="button" id="f_reloadBtn" class="btn btn-warning" style="width:100%; display:none; margin-top:6px; font-weight:600;">↻ 페이지 새로고침 (조회가 멈추면 눌러주세요)</button>
       <div class="et-hint">로컬 기록만 즉시 표시(클라우드 호출 없음). 과거는 백그라운드에서 클라우드로 보강돼 로컬에 저장됩니다.</div>
     </div>
     <div id="f_usageOut" style="display:none; margin:8px 0 4px;"></div>
@@ -186,11 +187,26 @@
         return h;
       }
 
+      // hb.request 를 타임아웃으로 감싼다 — Config UI X 커스텀 UI 서버(자식 프로세스)가
+      // (다른 플러그인 설정을 갔다 온 뒤 등) 연결이 어긋나면 응답이 안 와 무한 대기하기 때문.
+      const reqT = (path, body, ms) => Promise.race([
+        homebridge.request(path, body),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('서버 응답 시간 초과(' + Math.round(ms / 1000) + '초)')), ms)),
+      ]);
+
+      // 전체(부모) 페이지 새로고침 = 도우미 서버 연결을 깨끗하게 다시 맺는 가장 확실한 방법.
+      // 커스텀 UI 는 iframe 안이라 window.top 을 새로고침해야 한다.
+      const reloadBtn = $('f_reloadBtn');
+      reloadBtn.addEventListener('click', () => {
+        try { (window.top || window).location.reload(); } catch (e) { window.location.reload(); }
+      });
+
       usageBtn.addEventListener('click', async () => {
         usageBtn.disabled = true; const label = usageBtn.textContent; usageBtn.textContent = '불러오는 중…';
+        reloadBtn.style.display = 'none';
         usageOut.style.display = ''; usageOut.innerHTML = '<div style="color:#6c757d;">로컬 기록 조회 중…</div>';
         try {
-          const res = await homebridge.request('/usage', {});
+          const res = await reqT('/usage', {}, 8000);
           const mres = (res && res.monthly) || {};
           const dres = (res && res.daily) || {};
           const months = mres.months || [];
@@ -202,12 +218,14 @@
           const mHtml = usageTable('월별 (최근 1년)', '월', 'month', months, '당월(현재까지)', mCur, emptyM);
           const dHtml = usageTable('일별 (최근 30일)', '일자', 'date', days, '오늘(현재까지)', dToday, emptyD);
           if (!months.length && !days.length && !mCur && !dToday) {
-            usageOut.innerHTML = '<div style="color:#6c757d;">데이터가 없습니다. (로컬 기록이 쌓이기 전이면 Homebridge 재시작 후 잠시 기다려 주세요)</div>';
+            usageOut.innerHTML = '<div style="color:#6c757d;">데이터가 없습니다. (로컬 기록이 쌓이기 전이면 잠시 후 다시 눌러 주세요)</div>';
           } else {
             usageOut.innerHTML = `<div style="display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start;">${mHtml}${dHtml}</div>`;
           }
         } catch (e) {
-          usageOut.innerHTML = `<div style="color:#c0392b;">조회 실패: ${(e && e.message) || e}</div>`;
+          // 자식 서버 미응답(SPA 연결 어긋남) → 재시도로는 안 풀림. 전체 페이지 새로고침 버튼을 띄운다.
+          reloadBtn.style.display = '';
+          usageOut.innerHTML = `<div style="color:#c0392b;">조회 실패: ${(e && e.message) || e}<br><span style="color:#8a9099; font-size:0.82rem;">위 <b>↻ 페이지 새로고침</b> 버튼(또는 브라우저 F5)을 누르면 거의 해결됩니다. 다른 플러그인 설정을 다녀오면 UI 서버 연결이 끊길 수 있습니다.</span></div>`;
         } finally {
           usageBtn.disabled = false; usageBtn.textContent = label;
         }
