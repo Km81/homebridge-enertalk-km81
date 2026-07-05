@@ -124,6 +124,11 @@
       $('f_outlet').checked = c.exposeOutlet === true;  // 기본 off
       $('f_outletName').value = c.outletName || '';
       $('f_pluginName').value = c.name || 'EnerTalkKm81'; // 로그 라벨 / Plugin Logs 필터
+      // 마이그레이션(pre-1.11.3): 예전엔 config.name 이 콘센트 이름이었다. 콘센트를 켰고
+      // outletName 이 아직 없으며 name 이 기본값이 아니면, 그 값을 콘센트 이름 칸으로 옮겨준다.
+      if (c.exposeOutlet === true && !c.outletName && c.name && c.name !== 'EnerTalkKm81') {
+        $('f_outletName').value = c.name;
+      }
       $('f_polling').value = c.pollingInterval || 30;
       $('f_billing').value = c.billingInterval || 300;
 
@@ -145,21 +150,22 @@
       refresh();
 
       function collect() {
-        const cfg = { platform: PLATFORM };
+        // 로드된 c 를 펼쳐 스키마에 없는 필드(clientId/clientSecret 등)를 보존한다.
+        // 새 객체만 만들면 폼 밖 필드가 저장 시 영구 삭제된다.
+        const cfg = { ...c, platform: PLATFORM };
         cfg.email = $('f_email').value.trim();
         cfg.password = $('f_password').value;
         cfg.localMode = $('f_local').checked;
-        if (cfg.localMode) {
-          cfg.localPort = Number($('f_lport').value) || 5010;
-          const md = parseInt($('f_mday').value, 10);
-          if (md >= 1 && md <= 31) cfg.meteringDay = md;
-        }
+        cfg.localPort = Number($('f_lport').value) || 5010;
+        // 검침일: 입력값이 유효하면 기록, 비었으면 삭제(모드 무관 보존 — 클라우드로 잠깐 바꿔도 유실 없음).
+        const md = parseInt($('f_mday').value, 10);
+        if (md >= 1 && md <= 31) cfg.meteringDay = md; else delete cfg.meteringDay;
         cfg.exposePower = $('f_power').checked;
-        const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn;
+        const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn; else delete cfg.powerSensorName;
         cfg.exposeUsage = $('f_usage').checked;
-        const un = $('f_uname').value.trim(); if (un) cfg.usageSensorName = un;
+        const un = $('f_uname').value.trim(); if (un) cfg.usageSensorName = un; else delete cfg.usageSensorName;
         cfg.exposeOutlet = $('f_outlet').checked;
-        const on = $('f_outletName').value.trim(); if (on) cfg.outletName = on;
+        const on = $('f_outletName').value.trim(); if (on) cfg.outletName = on; else delete cfg.outletName;
         // 로그 라벨/Plugin Logs 필터용 — 항상 기록(비면 기본값). 이게 없으면 Plugin Logs 가 비어 보임.
         cfg.name = $('f_pluginName').value.trim() || 'EnerTalkKm81';
         cfg.pollingInterval = Number($('f_polling').value) || 30;
