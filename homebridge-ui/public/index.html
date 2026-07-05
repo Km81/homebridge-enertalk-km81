@@ -213,6 +213,9 @@
           if (!months.length) {
             html += '<div style="color:#8a9099; font-size:0.8rem; margin-top:6px;">아직 기록된 과거 월이 없습니다. 로컬 모드로 두면 매월 검침일마다 한 달씩 자동으로 쌓입니다.</div>';
           }
+          if (res && res.cloudOk === false && (email && password)) {
+            html += '<div style="color:#8a9099; font-size:0.78rem; margin-top:6px;">클라우드 응답이 느려 로컬 기록만 표시했습니다(과거 월은 클라우드 보강이 빠질 수 있음).</div>';
+          }
           if (!months.length && !cur) html = '<div style="color:#6c757d;">데이터가 없습니다.</div>';
           monthlyOut.innerHTML = html;
         } catch (e) {
@@ -246,6 +249,9 @@
           html += '</table>';
           if (!days.length) {
             html += '<div style="color:#8a9099; font-size:0.8rem; margin-top:6px;">아직 기록된 과거 일자가 없습니다. 로컬 모드로 두면 매일 자정마다 하루씩 자동으로 쌓입니다.</div>';
+          }
+          if (res && res.cloudOk === false && $('f_email').value.trim() && $('f_password').value) {
+            html += '<div style="color:#8a9099; font-size:0.78rem; margin-top:6px;">클라우드 응답이 느려 로컬 기록만 표시했습니다(과거 일자는 클라우드 보강이 빠질 수 있음).</div>';
           }
           if (!days.length && !today) html = '<div style="color:#6c757d;">데이터가 없습니다.</div>';
           dailyOut.innerHTML = html;
