@@ -190,14 +190,13 @@
         usageBtn.disabled = true; const label = usageBtn.textContent; usageBtn.textContent = '불러오는 중…';
         usageOut.style.display = ''; usageOut.innerHTML = '<div style="color:#6c757d;">로컬 기록 조회 중…</div>';
         try {
-          const [mres, dres] = await Promise.all([
-            homebridge.request('/monthly', {}),
-            homebridge.request('/daily', {}),
-          ]);
-          const months = (mres && mres.months) || [];
-          const days = (dres && dres.days) || [];
-          const mCur = mres && mres.current;
-          const dToday = dres && dres.today;
+          const res = await homebridge.request('/usage', {});
+          const mres = (res && res.monthly) || {};
+          const dres = (res && res.daily) || {};
+          const months = mres.months || [];
+          const days = dres.days || [];
+          const mCur = mres.current;
+          const dToday = dres.today;
           const emptyM = '아직 로컬에 쌓인 과거 월이 없습니다. 백그라운드 보강(최대 12시간) 후 채워지고, 이후 매월 검침일마다 자동으로 쌓입니다.';
           const emptyD = '아직 로컬에 쌓인 과거 일자가 없습니다. 백그라운드 보강(최대 12시간) 후 채워지고, 이후 매일 자정마다 자동으로 쌓입니다.';
           const mHtml = usageTable('월별 (최근 1년)', '월', 'month', months, '당월(현재까지)', mCur, emptyM);

@@ -19,9 +19,16 @@ const KST = 9 * 3600 * 1000;
 class UiServer extends HomebridgePluginUiServer {
   constructor() {
     super();
+    // 월별·일별을 한 번의 요청으로 반환(동시 요청 회피). /monthly·/daily 는 하위호환용 유지.
+    this.onRequest('/usage', this.getUsage.bind(this));
     this.onRequest('/monthly', this.getMonthly.bind(this));
     this.onRequest('/daily', this.getDaily.bind(this));
     this.ready();
+  }
+
+  /** 월별+일별을 한 응답으로. (단일 요청 → Config UI X 동시요청 이슈 회피) */
+  async getUsage() {
+    return { monthly: await this.getMonthly(), daily: await this.getDaily() };
   }
 
   /** 플러그인 상태 파일(enertalk-km81-monthly.json) 전체를 읽는다. */
