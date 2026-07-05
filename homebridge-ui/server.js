@@ -39,12 +39,28 @@ class UiServer extends HomebridgePluginUiServer {
     } catch (e) { return {}; }
   }
 
-  /** 당월(현재까지) — 로컬 카운터 산출 우선, 없으면(클라우드 모드) 클라우드 billing 값. */
+  /** now(KST) 가 속한 검침주기 시작(ms). 플러그인 MonthlyTracker._periodStartFor 와 동일 규칙. */
+  _periodStartFor(nowMs, meteringDay) {
+    const md = (meteringDay >= 1 && meteringDay <= 31) ? meteringDay : 1;
+    const d = new Date(nowMs + KST);
+    const y = d.getUTCFullYear(); const m = d.getUTCMonth(); const day = d.getUTCDate();
+    const clamp = (yy, mm) => Math.min(md, new Date(Date.UTC(yy, mm + 1, 0)).getUTCDate());
+    const thisMd = clamp(y, m);
+    if (day >= thisMd) return Date.UTC(y, m, thisMd) - KST;
+    return Date.UTC(y, m - 1, clamp(y, m - 1)) - KST;
+  }
+
+  /** 당월(현재까지) — 로컬 카운터 산출 우선, 없으면(클라우드 모드) 클라우드 billing 값.
+   *  단, 저장된 기준선이 '현재' 검침주기의 것일 때만 사용(다운 중 검침일을 넘겼으면 전월 총량이
+   *  당월로 표시되는 것을 방지 — 라이브 플러그인만 롤오버하므로 파일값이 낡을 수 있다). */
   _localMonthCurrent() {
     const st = this._readState();
-    if (st.lastCounter_mWh != null && st.periodStartCounter_mWh != null) {
-      const k = (st.lastCounter_mWh - st.periodStartCounter_mWh) / 1e6;
-      if (k >= 0) return k;
+    if (st.lastCounter_mWh != null && st.periodStartCounter_mWh != null && st.periodStartMs != null) {
+      const curStart = this._periodStartFor(Date.now(), st.effectiveMeteringDay);
+      if (st.periodStartMs === curStart) {
+        const k = (st.lastCounter_mWh - st.periodStartCounter_mWh) / 1e6;
+        if (k >= 0) return k;
+      }
     }
     return st.cloudMonthCurrent != null ? st.cloudMonthCurrent : null;
   }

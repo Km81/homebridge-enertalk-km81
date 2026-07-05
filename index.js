@@ -110,7 +110,12 @@ class EnerTalkPlatform {
       // 부팅 시점 일시적 실패(네트워크 미준비/타임아웃/5xx)로 영구 사망하지 않도록 백오프 재시도.
       const delay = Math.min(600, 30 * Math.pow(2, attempt)) * 1000;
       this.log.warn(`[EnerTalk] site 목록 조회 실패 — ${Math.round(delay / 1000)}초 후 재시도 (이메일/비밀번호도 확인): ${e.message}`);
-      this._startRetryTimer = setTimeout(() => this._start(attempt + 1), delay);
+      // 재시도의 반환 프로미스를 잡아준다 — setup tail(HAP 등록 등)이 throw 하면
+      // unhandledRejection 으로 Homebridge 전체가 죽을 수 있으므로 반드시 .catch.
+      this._startRetryTimer = setTimeout(() => {
+        this._start(attempt + 1).catch((err) =>
+          this.log.error('[EnerTalk] 재시도 시작 실패:', err && err.message ? err.message : err));
+      }, delay);
       return;
     }
     if (this._stopped) return; // await 도중 셧다운되면 타이머/등록을 만들지 않음
@@ -148,6 +153,9 @@ class EnerTalkPlatform {
       meteringDay: Number(this.config.meteringDay) || null,
       log: this.log,
     });
+    // 클라우드 모드는 로컬 카운터가 없다. 이전에 로컬 모드로 쓰던 상태파일의 로컬 카운터 필드가
+    // 남아 있으면 UI '당월/오늘(현재까지)'이 옛 로컬값에 얼어붙으므로 제거(클라우드값만 표시).
+    this.monthly.clearLocalCounters();
     this._billingSiteId = sites[0].id;
     const backfill = () => this._backfillHistoryFromCloud().catch((e) =>
       this.log.debug('[EnerTalk] 히스토리 backfill 오류:', e.message));
@@ -333,9 +341,8 @@ class EnerTalkPlatform {
 
   async _startLocal() {
     if (!this.enabled) return;
-    this._localStartMs = Date.now();
 
-    // 0) 저장소 + 당월 사용량 로컬 산출기(기기 누적 카운터 기반, 클라우드로 보정)
+    // 0) 저장소 + 당월 사용량 로컬 산출기(기기 누적 카운터 기반, 완전 로컬)
     this._storageDir = '.';
     try { this._storageDir = this.api.user.storagePath(); } catch (e) { /* 무시 */ }
     this.monthly = new MonthlyTracker({
@@ -343,30 +350,74 @@ class EnerTalkPlatform {
       meteringDay: Number(this.config.meteringDay) || null,
       log: this.log,
     });
+    // 로컬 모드는 클라우드 학습이 없으므로 검침일을 반드시 설정해야 한다. 미설정이면 매월 1일로
+    // 폴백되어 당월 경계가 어긋나는데(조용한 오류) 이를 로그로 표면화한다.
+    if (!(Number(this.config.meteringDay) >= 1)) {
+      this.log.warn('[EnerTalk][local] 검침일(meteringDay) 미설정 — 매월 1일 기준으로 당월을 산출합니다. 실제 검침일이 1일이 아니면 설정에서 검침일을 입력하세요.');
+    }
+    // 로컬 모드는 Eve 콘센트 액세서리를 만들지 않는다(실시간/당월은 조도센서로 노출). 조용히
+    // 무시되지 않도록 켜져 있으면 안내.
+    if (this.exposeOutlet) {
+      this.log.warn('[EnerTalk][local] 로컬 모드에서는 Eve 콘센트 옵션이 지원되지 않아 무시됩니다(실시간·당월은 조도센서 액세서리로 표시).');
+    }
 
-    // 1) siteId 확정 — 저장된 값(클라우드 모드와 동일 UUID) 우선. 없으면 'local' 로 시작하되
-    //    클라우드가 살아나면 백그라운드에서 실제 siteId 로 승격(#12 churn 최소화).
+    // 1) siteId 확정 — 저장된 값(클라우드 모드와 동일 UUID) 우선. 없으면 'local' 고정.
     this._billingSiteId = null;
     this._localSiteId = this._loadSiteId() || 'local';
 
     // 2) 로컬 액세서리 준비(클라우드 모드와 동일 UUID)
     this._setupLocalAccessories(this._localSiteId);
 
-    // 3) TLS 서버 시작(먼저 열어 기기 수신 준비)
-    this.localServer = new LocalServer({ port: this.localPort, log: this.log });
-    this.localServer.on('reading', (r) => {
+    // 3) TLS 서버 시작 — listen 실패(EADDRINUSE 등)는 비동기 'error' 로 오므로 try/catch 로는
+    //    못 잡는다. 실패 시 백오프 재시도(매 시도 새 LocalServer). 성공하면 워치독 가동.
+    this._startLocalServer(0);
+
+    // 4) 완전 로컬 독립 — 클라우드를 일절 사용하지 않는다(폴백/보정/backfill/교차검증 없음).
+    this.log.info('[EnerTalk][local] 완전 로컬 독립 모드 — 클라우드 미사용 (실시간·당월 모두 기기 카운터).');
+  }
+
+  /** 로컬 TLS 서버 기동 + listen 실패 시 백오프 재시도. 성공 시 staleness 워치독 가동. */
+  _startLocalServer(attempt) {
+    if (this._stopped) return;
+    const srv = new LocalServer({ port: this.localPort, log: this.log });
+    this.localServer = srv;
+    srv.on('reading', (r) => {
       try { this._onLocalReading(r); } catch (e) { this.log.debug('[EnerTalk][local] reading 처리 오류:', e.message); }
     });
-    try {
-      this.localServer.start();
-    } catch (e) {
-      this.log.error('[EnerTalk][local] TLS 서버 시작 실패:', e && e.message);
-    }
+    srv.once('listening', () => this._startStaleWatchdog());
+    srv.once('listen-error', () => {
+      try { srv.stop(); } catch (e) { /* 무시 */ }
+      if (this._stopped) return;
+      const delay = Math.min(600, 15 * Math.pow(2, attempt)) * 1000; // 15s→30s→…→최대 10분
+      this.log.error(`[EnerTalk][local] 포트 ${this.localPort} 사용 중/열기 실패 — ${Math.round(delay / 1000)}초 후 재시도.`);
+      this._localRetryTimer = setTimeout(() => this._startLocalServer(attempt + 1), delay);
+    });
+    try { srv.start(); } catch (e) { this.log.error('[EnerTalk][local] TLS 서버 시작 예외:', e && e.message); }
+  }
 
-    // 4) 완전 로컬 독립 — 클라우드를 일절 사용하지 않는다.
-    //    실시간·당월 전부 기기 직수신 카운터로만 산출. 클라우드 폴백/기준선 보정/과거 backfill/
-    //    교차검증 없음. 검침일은 설정값(config.meteringDay) 또는 기본 1일.
-    this.log.info('[EnerTalk][local] 완전 로컬 독립 모드 — 클라우드 미사용 (실시간·당월 모두 기기 카운터, 폴백/보정/backfill 없음).');
+  /**
+   * 기기 프레임이 staleMs 이상 끊기면 액세서리를 'No Response' 로 표시(옛 값 영구 표시 방지).
+   * 로컬은 push 전용이라 기기 전원/네트워크가 끊기면 마지막 값이 정상처럼 남는 문제를 해소.
+   * 첫 수신 전(ctx.started=false)엔 발동하지 않는다. 복귀하면 _onLocalReading 이 정상값으로 덮는다.
+   */
+  _startStaleWatchdog() {
+    const ctx = this.localCtx;
+    if (!ctx || ctx._watchdog) return;
+    const staleMs = Math.max(60, this.pollingInterval * 4) * 1000;
+    const tick = () => {
+      const c = this.localCtx;
+      if (!c || !c.started || c._stale) return;
+      if (Date.now() - c.lastLocalMs <= staleMs) return;
+      c._stale = true;
+      this.log.warn(`[EnerTalk][local] 기기 무수신 ${Math.round((Date.now() - c.lastLocalMs) / 1000)}초 — 액세서리를 응답없음으로 표시(기기 전원/네트워크 확인).`);
+      const err = new Error('EnerTalk device not responding');
+      for (const svc of [c.powerLux, c.usageLux]) {
+        if (!svc) continue;
+        try { svc.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(err); } catch (e) { /* 무시 */ }
+      }
+    };
+    ctx._watchdog = setInterval(tick, Math.max(30, this.pollingInterval) * 1000);
+    ctx.timers.push(ctx._watchdog);
   }
 
   /** 클라우드 과거 일별(최근 35일)·월별(최근 13개월)을 로컬 히스토리에 backfill. 로컬 기록 우선.
@@ -401,18 +452,12 @@ class EnerTalkPlatform {
     }
   }
 
+  // 로컬 모드 액세서리 UUID 안정화용 siteId. 과거 클라우드 세션이 저장해둔 값이 있으면 재사용,
+  // 없으면 'local'(v1.11.4부터 로컬 모드는 클라우드로 siteId 를 승격하지 않는다).
   _siteFile() { return require('path').join(this._storageDir || '.', 'enertalk-km81-site.json'); }
   _loadSiteId() {
     try { return JSON.parse(require('fs').readFileSync(this._siteFile(), 'utf8')).siteId || null; }
     catch (e) { return null; }
-  }
-  _saveSiteId(id) {
-    try {
-      const fs = require('fs');
-      const tmp = this._siteFile() + '.tmp';
-      fs.writeFileSync(tmp, JSON.stringify({ siteId: id }));
-      fs.renameSync(tmp, this._siteFile());
-    } catch (e) { this.log.debug('[EnerTalk][local] site 저장 실패:', e.message); }
   }
 
   _setupLocalAccessories(siteId) {
@@ -473,20 +518,22 @@ class EnerTalkPlatform {
     this.localCtx = {
       powerLux, usageLux, history,
       timers: [],
-      loggedRealtime: false,
+      loggedRealtime: false, loggedMonthly: false,
       deviceId: null,        // 락온한 기기 식별자(다중 기기 오염 방지)
       lastLocalMs: Date.now(), // 마지막 로컬 수신 시각(부팅 직후 쓰레기 로그 방지 #17)
       started: false,        // 첫 로컬 수신 로그를 한 번만 남기기 위한 플래그
+      _stale: false,         // staleness 워치독이 'No Response' 표시 중인지
       // 기기 누적 카운터 — 영속값으로 seed(재시작 직후에도 로컬 산출 즉시 복귀)
       lastCounter_mWh: (this.monthly && this.monthly.lastCounter()) || null,
       lastHistoryMs: 0,      // fakegato 히스토리 마지막 기록 시각(throttle)
     };
   }
 
-  /** 당월 사용량(kWh)을 기기 누적 카운터로 로컬 산출·갱신(클라우드 미사용, 완전 로컬). */
-  _updateMonthlyUsage(logInfo) {
+  /** 당월 사용량(kWh)을 기기 누적 카운터로 로컬 산출·갱신(클라우드 미사용, 완전 로컬).
+   *  usageLux 액세서리가 꺼져 있어도 기준선/롤오버는 항상 유지해야 UI 조회·일별 축적이 정상. */
+  _updateMonthlyUsage() {
     const ctx = this.localCtx;
-    if (!ctx || !ctx.usageLux || ctx.lastCounter_mWh == null || !this.monthly) return;
+    if (!ctx || ctx.lastCounter_mWh == null || !this.monthly) return;
     const now = Date.now();
 
     // 기준선을 로컬에서 확정(오늘 자정 카운터 기준). 이미 이 주기에 확정돼 있으면 그대로 유지.
@@ -494,10 +541,13 @@ class EnerTalkPlatform {
 
     const kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, now);
     if (kwh == null) return;
-    ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
-    ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
-    if (logInfo) {
-      this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh (로컬 산출) — 정상`);
+    if (ctx.usageLux) {
+      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
+      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+    }
+    if (!ctx.loggedMonthly) {
+      this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh (로컬 산출) — 정상 (이후 갱신은 debug 로그)`);
+      ctx.loggedMonthly = true;
     }
   }
 
@@ -544,16 +594,22 @@ class EnerTalkPlatform {
     const amps = r.current_mA != null ? r.current_mA / 1000 : NaN;
 
     ctx.lastLocalMs = Date.now();
+    if (ctx._stale) { // 무수신(No Response) 상태에서 복귀 — 정상 표시로 자동 원복
+      ctx._stale = false;
+      this.log.info('[EnerTalk][local] 기기 수신 복귀 — 응답없음 해제.');
+    }
     this._applyRealtime(watts, volts, amps);
 
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(완전 로컬, 클라우드 미사용).
-    if (r.energy_mWh != null) {
+    // 손상 프레임(음수/비현실적 거대값)은 당월·일별 오염을 막기 위해 카운터 반영을 건너뛴다
+    // (실시간 W/V/A 는 위에서 이미 반영됨). 정상 프레임에서 자동 회복.
+    if (r.energy_mWh != null && r.energy_mWh >= 0 && r.energy_mWh < 1e13) {
       ctx.lastCounter_mWh = r.energy_mWh;
       if (this.monthly) {
         this.monthly.recordCounter(r.energy_mWh, ctx.lastLocalMs); // 재시작 대비 영속(~60초 throttle)
         this.monthly.recordDaily(r.energy_mWh, ctx.lastLocalMs);   // 일별 사용량 로컬 기록(KST 자정 경계)
       }
-      this._updateMonthlyUsage(false);
+      this._updateMonthlyUsage();
     }
 
     const msg = `[EnerTalk][local] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A / ${r.freqHz}Hz (기기 직수신)`;
