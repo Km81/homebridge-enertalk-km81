@@ -27,7 +27,7 @@
     <div class="et-row">
       <button type="button" id="f_usageBtn" class="btn btn-primary" style="width:100%;">사용량 보기 (월별 · 일별)</button>
       <button type="button" id="f_reloadBtn" class="btn btn-warning" style="width:100%; display:none; margin-top:6px; font-weight:600;">↻ 페이지 새로고침 (조회가 멈추면 눌러주세요)</button>
-      <div class="et-hint">로컬 기록만 즉시 표시(클라우드 호출 없음). 과거는 백그라운드에서 클라우드로 보강돼 로컬에 저장됩니다.</div>
+      <div class="et-hint">로컬에 쌓인 기록만 즉시 표시(클라우드 호출 없음). 로컬 모드는 매일 자정·검침일마다 기기 카운터로 자동 축적됩니다.</div>
     </div>
     <div id="f_usageOut" style="display:none; margin:8px 0 4px;"></div>
     <hr>
@@ -44,21 +44,16 @@
       <input type="number" id="f_lport" class="form-control" value="5010" min="1" max="65535">
       <div class="et-hint">기본 5010. 보통 그대로.</div>
     </div>
-    <div class="et-row et-indent" id="f_lstaleRow">
-      <label for="f_lstale">로컬→클라우드 폴백 임계값(초)</label>
-      <input type="number" id="f_lstale" class="form-control" value="90" min="30" max="3600">
-      <div class="et-hint">로컬 수신이 이 시간 이상 끊기면 클라우드로 자동 폴백, 복구되면 원복. (클라우드 자격증명 필요)</div>
-    </div>
     <div class="et-row et-indent" id="f_mdayRow">
-      <label for="f_mday">검침일 (1~31, 선택)</label>
-      <input type="number" id="f_mday" class="form-control" placeholder="비우면 클라우드에서 자동 학습" min="1" max="31">
-      <div class="et-hint">당월 사용량을 기기 카운터로 로컬 산출할 때 쓰는 검침일. <b>입력하면 최우선</b>(클라우드가 다른 날짜를 보고해도 이 값이 이김). 비우면 클라우드 billing 에서 자동 학습.</div>
+      <label for="f_mday">검침일 (1~31)</label>
+      <input type="number" id="f_mday" class="form-control" placeholder="예: 8 (비우면 매월 1일)" min="1" max="31">
+      <div class="et-hint">당월 사용량을 기기 카운터로 로컬 산출할 때 쓰는 검침일. 로컬 모드는 <b>완전 로컬 독립</b>이라 이 값으로만 주기를 계산합니다(클라우드 미사용). 비우면 매월 1일 기준.</div>
     </div>
 
     <div class="et-row">
       <label for="f_email">에너톡 이메일 <span id="f_emailReq">*</span></label>
       <input type="email" id="f_email" class="form-control" placeholder="you@example.com" autocomplete="off">
-      <div class="et-hint" id="f_emailHint">로컬 모드면 비워도 됩니다(당월 사용량은 클라우드가 있으면 병행, 없으면 기기 누적 카운터).</div>
+      <div class="et-hint" id="f_emailHint">로컬 모드는 완전 독립이라 이메일/비밀번호를 비워도 됩니다(클라우드 미사용, 당월·실시간 모두 기기 카운터로 산출).</div>
     </div>
     <div class="et-row">
       <label for="f_password">에너톡 비밀번호 <span id="f_pwReq">*</span></label>
@@ -85,11 +80,16 @@
     <!-- 옵션 콘센트 -->
     <label class="et-check"><input type="checkbox" id="f_outlet"><span>Eve 에너지 그래프용 콘센트 추가 (선택 · 동작 없는 On 토글 생김)</span></label>
     <div class="et-row et-indent" id="f_outletnameRow">
-      <label for="f_name">콘센트 이름</label>
-      <input type="text" id="f_name" class="form-control" placeholder="소비전력">
+      <label for="f_outletName">콘센트 이름</label>
+      <input type="text" id="f_outletName" class="form-control" placeholder="소비전력">
     </div>
 
     <hr>
+    <div class="et-row">
+      <label for="f_pluginName">플러그인/로그 이름</label>
+      <input type="text" id="f_pluginName" class="form-control" value="EnerTalkKm81" placeholder="EnerTalkKm81">
+      <div class="et-hint">Homebridge 로그 앞 <code>[대괄호]</code> 라벨이자 Config UI X의 <b>Plugin Logs 필터</b> 기준입니다. 비우면 Plugin Logs 에서 로그가 안 보일 수 있으니 그대로 두는 걸 권장.</div>
+    </div>
     <div class="et-row">
       <label for="f_polling">실시간 폴링 주기(초)</label>
       <input type="number" id="f_polling" class="form-control" value="30" min="10" max="3600">
@@ -98,7 +98,7 @@
     <div class="et-row">
       <label for="f_billing">당월 사용량 폴링 주기(초)</label>
       <input type="number" id="f_billing" class="form-control" value="300" min="60" max="86400">
-      <div class="et-hint">권장 300초.</div>
+      <div class="et-hint">권장 300초. (클라우드 모드에서만 사용)</div>
     </div>
 
   </div>
@@ -116,14 +116,14 @@
       $('f_password').value = c.password || '';
       $('f_local').checked = c.localMode === true;      // 기본 off
       $('f_lport').value = c.localPort || 5010;
-      $('f_lstale').value = c.localStaleSeconds || 90;
       $('f_mday').value = c.meteringDay || '';
       $('f_power').checked = c.exposePower !== false;   // 기본 on
       $('f_pname').value = c.powerSensorName || '';
       $('f_usage').checked = c.exposeUsage !== false;   // 기본 on
       $('f_uname').value = c.usageSensorName || '';
       $('f_outlet').checked = c.exposeOutlet === true;  // 기본 off
-      $('f_name').value = c.name || '';
+      $('f_outletName').value = c.outletName || '';
+      $('f_pluginName').value = c.name || 'EnerTalkKm81'; // 로그 라벨 / Plugin Logs 필터
       $('f_polling').value = c.pollingInterval || 30;
       $('f_billing').value = c.billingInterval || 300;
 
@@ -133,7 +133,6 @@
         $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none';
         const local = $('f_local').checked;
         $('f_lportRow').style.display = local ? '' : 'none';
-        $('f_lstaleRow').style.display = local ? '' : 'none';
         $('f_mdayRow').style.display = local ? '' : 'none';
         // 로컬 모드면 이메일/비번 필수 표시 완화
         $('f_emailReq').style.display = local ? 'none' : '';
@@ -152,7 +151,6 @@
         cfg.localMode = $('f_local').checked;
         if (cfg.localMode) {
           cfg.localPort = Number($('f_lport').value) || 5010;
-          cfg.localStaleSeconds = Number($('f_lstale').value) || 90;
           const md = parseInt($('f_mday').value, 10);
           if (md >= 1 && md <= 31) cfg.meteringDay = md;
         }
@@ -161,18 +159,24 @@
         cfg.exposeUsage = $('f_usage').checked;
         const un = $('f_uname').value.trim(); if (un) cfg.usageSensorName = un;
         cfg.exposeOutlet = $('f_outlet').checked;
-        const nm = $('f_name').value.trim(); if (nm) cfg.name = nm;
+        const on = $('f_outletName').value.trim(); if (on) cfg.outletName = on;
+        // 로그 라벨/Plugin Logs 필터용 — 항상 기록(비면 기본값). 이게 없으면 Plugin Logs 가 비어 보임.
+        cfg.name = $('f_pluginName').value.trim() || 'EnerTalkKm81';
         cfg.pollingInterval = Number($('f_polling').value) || 30;
         cfg.billingInterval = Number($('f_billing').value) || 300;
         return cfg;
       }
       async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증 */ } }
 
-      ['f_email', 'f_password', 'f_lport', 'f_lstale', 'f_mday', 'f_pname', 'f_uname', 'f_name', 'f_polling', 'f_billing']
+      ['f_email', 'f_password', 'f_lport', 'f_mday', 'f_pname', 'f_uname', 'f_outletName', 'f_pluginName', 'f_polling', 'f_billing']
         .forEach((id) => $(id).addEventListener('input', sync));
       ['f_email', 'f_password'].forEach((id) => $(id).addEventListener('input', refresh)); // 경고 실시간 갱신
       ['f_power', 'f_usage', 'f_outlet', 'f_local'].forEach((id) =>
         $(id).addEventListener('change', () => { refresh(); sync(); }));
+
+      // 로드 직후 1회 스테이징 — 사용자가 아무 것도 안 건드리고 저장만 눌러도
+      // name(로그 라벨/Plugin Logs 필터) 등 기본값이 config 에 확실히 기록되게 한다.
+      sync();
 
       // ── 사용량 조회(월별·일별 통합) ─────────────────────────────
       const usageBtn = $('f_usageBtn'), usageOut = $('f_usageOut');

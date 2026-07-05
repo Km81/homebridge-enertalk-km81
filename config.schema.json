@@ -40,15 +40,6 @@
         "condition": { "functionBody": "return model.localMode === true;" },
         "description": "기기가 접속하는 포트(기본 5010). 보통 그대로 둡니다."
       },
-      "localStaleSeconds": {
-        "title": "로컬→클라우드 폴백 임계값(초)",
-        "type": "integer",
-        "default": 90,
-        "minimum": 30,
-        "maximum": 3600,
-        "condition": { "functionBody": "return model.localMode === true;" },
-        "description": "로컬(기기 직수신)이 이 시간 이상 끊기면 클라우드로 자동 폴백(클라우드 자격증명 필요). 복구되면 자동 원복. 권장 90초."
-      },
       "meteringDay": {
         "title": "검침일 (일, 1~31)",
         "type": "integer",
