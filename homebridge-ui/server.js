@@ -39,12 +39,14 @@ class UiServer extends HomebridgePluginUiServer {
     } catch (e) { return {}; }
   }
 
-  /** 당월(현재까지) — 검침주기 기준선 카운터와 최근 카운터로 로컬 산출. */
+  /** 당월(현재까지) — 로컬 카운터 산출 우선, 없으면(클라우드 모드) 클라우드 billing 값. */
   _localMonthCurrent() {
     const st = this._readState();
-    if (st.lastCounter_mWh == null || st.periodStartCounter_mWh == null) return null;
-    const k = (st.lastCounter_mWh - st.periodStartCounter_mWh) / 1e6;
-    return k >= 0 ? k : null;
+    if (st.lastCounter_mWh != null && st.periodStartCounter_mWh != null) {
+      const k = (st.lastCounter_mWh - st.periodStartCounter_mWh) / 1e6;
+      if (k >= 0) return k;
+    }
+    return st.cloudMonthCurrent != null ? st.cloudMonthCurrent : null;
   }
 
   async getMonthly() {
@@ -54,19 +56,23 @@ class UiServer extends HomebridgePluginUiServer {
     for (const h of (st.history || [])) if (h && h.month) merged[h.month] = h.kwh;
     const cur = this._localMonthCurrent();
     const current = cur != null ? { kwh: round1(cur) } : null;
-    const months = Object.keys(merged).sort().map((m) => ({ month: m, kwh: round1(merged[m]) }));
+    // 라벨('최근 1년')에 맞춰 최근 12개월만 반환.
+    const months = Object.keys(merged).sort().slice(-12).map((m) => ({ month: m, kwh: round1(merged[m]) }));
     return { months, current };
   }
 
-  /** 오늘(현재까지) — 오늘 자정 기준 카운터와 최근 카운터로 로컬 산출. */
+  /** 오늘(현재까지) — 로컬 카운터 산출 우선, 없으면(클라우드 모드) 클라우드 일별 오늘값. */
   _localToday() {
     const st = this._readState();
-    if (st.lastCounter_mWh == null || st.dayStartCounter_mWh == null || st.dayStartMs == null) return null;
-    const d = new Date(Date.now() + KST);
-    const curDayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - KST;
-    if (st.dayStartMs !== curDayStart) return null; // 자정 지난 뒤 아직 새 프레임 없음 → 보류
-    const k = (st.lastCounter_mWh - st.dayStartCounter_mWh) / 1e6;
-    return k >= 0 ? k : null;
+    if (st.lastCounter_mWh != null && st.dayStartCounter_mWh != null && st.dayStartMs != null) {
+      const d = new Date(Date.now() + KST);
+      const curDayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - KST;
+      if (st.dayStartMs === curDayStart) {
+        const k = (st.lastCounter_mWh - st.dayStartCounter_mWh) / 1e6;
+        if (k >= 0) return k;
+      }
+    }
+    return st.cloudToday != null ? st.cloudToday : null;
   }
 
   async getDaily() {
@@ -76,7 +82,8 @@ class UiServer extends HomebridgePluginUiServer {
     for (const h of (st.dailyHistory || [])) if (h && h.date) merged[h.date] = h.kwh;
     const t = this._localToday();
     const today = t != null ? { kwh: round2(t) } : null;
-    const days = Object.keys(merged).sort().map((d) => ({ date: d, kwh: round2(merged[d]) }));
+    // 라벨('최근 30일')에 맞춰 최근 30일만 반환.
+    const days = Object.keys(merged).sort().slice(-30).map((d) => ({ date: d, kwh: round2(merged[d]) }));
     return { days, today };
   }
 }
