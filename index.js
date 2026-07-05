@@ -381,6 +381,41 @@ class EnerTalkPlatform {
     const pollRt = () => this._pollLocalRealtimeFallback(this._billingSiteId, staleMs).catch((e) =>
       this.log.debug('[EnerTalk][local] 실시간 폴백 오류:', e.message));
     this.localCtx.timers.push(setInterval(pollRt, this.pollingInterval * 1000));
+
+    // 과거 일별/월별을 클라우드에서 로컬 파일로 backfill(부팅 1회 + 12시간마다).
+    // 조회는 100% 로컬만 읽으므로, 이 백그라운드 보정이 로컬에 없는 과거치를 영구 저장한다.
+    const backfill = () => this._backfillHistoryFromCloud().catch((e) =>
+      this.log.debug('[EnerTalk][local] 히스토리 backfill 오류:', e.message));
+    backfill();
+    this.localCtx.timers.push(setInterval(backfill, 12 * 3600 * 1000));
+  }
+
+  /** 클라우드 과거 일별(최근 35일)·월별(최근 13개월)을 로컬 히스토리에 backfill. 로컬 기록 우선. */
+  async _backfillHistoryFromCloud() {
+    if (this._stopped || !this.client || !this._billingSiteId || !this.monthly) return;
+    const KST = 9 * 3600 * 1000;
+    const now = Date.now();
+    const sid = this._billingSiteId;
+
+    const dayp = await this.client.getPeriodic(sid, 'day', now - 35 * 86400000, now).catch(() => null);
+    if (dayp && Array.isArray(dayp.items)) {
+      const todayStr = new Date(now + KST).toISOString().slice(0, 10);
+      const entries = dayp.items.map((it) => ({
+        date: new Date((it.timestamp || 0) + KST).toISOString().slice(0, 10),
+        kwh: Math.round((it.usage || 0) / 1e6 * 100) / 100,
+      }));
+      this.monthly.backfillDaily(entries, todayStr);
+    }
+
+    const monp = await this.client.getPeriodic(sid, 'month', now - 400 * 86400000, now).catch(() => null);
+    if (monp && Array.isArray(monp.items)) {
+      const curMonthStr = new Date(now + KST).toISOString().slice(0, 7);
+      const entries = monp.items.map((it) => ({
+        month: new Date((it.timestamp || 0) + KST).toISOString().slice(0, 7),
+        kwh: Math.round((it.usage || 0) / 1e6 * 10) / 10,
+      }));
+      this.monthly.backfillMonthly(entries, curMonthStr);
+    }
   }
 
   _siteFile() { return require('path').join(this._storageDir || '.', 'enertalk-km81-site.json'); }
