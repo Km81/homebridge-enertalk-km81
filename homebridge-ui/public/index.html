@@ -77,6 +77,13 @@
       <input type="text" id="f_uname" class="form-control" placeholder="당월 사용량">
     </div>
 
+    <!-- 오늘 사용량 -->
+    <label class="et-check"><input type="checkbox" id="f_daily"><span>오늘 사용량 액세서리 추가 (kWh · 매일 자정 0부터)</span></label>
+    <div class="et-row et-indent" id="f_dnameRow">
+      <label for="f_dname">이름</label>
+      <input type="text" id="f_dname" class="form-control" placeholder="오늘 사용량">
+    </div>
+
     <!-- 옵션 콘센트 -->
     <label class="et-check"><input type="checkbox" id="f_outlet"><span>Eve 에너지 그래프용 콘센트 추가 (선택 · 동작 없는 On 토글 생김)</span></label>
     <div class="et-row et-indent" id="f_outletnameRow">
@@ -121,6 +128,8 @@
       $('f_pname').value = c.powerSensorName || '';
       $('f_usage').checked = c.exposeUsage !== false;   // 기본 on
       $('f_uname').value = c.usageSensorName || '';
+      $('f_daily').checked = c.exposeDaily !== false;   // 기본 on
+      $('f_dname').value = c.dailySensorName || '';
       $('f_outlet').checked = c.exposeOutlet === true;  // 기본 off
       $('f_outletName').value = c.outletName || '';
       $('f_pluginName').value = c.name || 'EnerTalkKm81'; // 로그 라벨 / Plugin Logs 필터
@@ -135,6 +144,7 @@
       const refresh = () => {
         $('f_pnameRow').style.display = $('f_power').checked ? '' : 'none';
         $('f_unameRow').style.display = $('f_usage').checked ? '' : 'none';
+        $('f_dnameRow').style.display = $('f_daily').checked ? '' : 'none';
         $('f_outletnameRow').style.display = $('f_outlet').checked ? '' : 'none';
         const local = $('f_local').checked;
         $('f_lportRow').style.display = local ? '' : 'none';
@@ -164,6 +174,8 @@
         const pn = $('f_pname').value.trim(); if (pn) cfg.powerSensorName = pn; else delete cfg.powerSensorName;
         cfg.exposeUsage = $('f_usage').checked;
         const un = $('f_uname').value.trim(); if (un) cfg.usageSensorName = un; else delete cfg.usageSensorName;
+        cfg.exposeDaily = $('f_daily').checked;
+        const dn = $('f_dname').value.trim(); if (dn) cfg.dailySensorName = dn; else delete cfg.dailySensorName;
         cfg.exposeOutlet = $('f_outlet').checked;
         const on = $('f_outletName').value.trim(); if (on) cfg.outletName = on; else delete cfg.outletName;
         // 로그 라벨/Plugin Logs 필터용 — 항상 기록(비면 기본값). 이게 없으면 Plugin Logs 가 비어 보임.
@@ -174,10 +186,10 @@
       }
       async function sync() { try { await homebridge.updatePluginConfig([collect()]); } catch (e) { /* 저장 시 검증 */ } }
 
-      ['f_email', 'f_password', 'f_lport', 'f_mday', 'f_pname', 'f_uname', 'f_outletName', 'f_pluginName', 'f_polling', 'f_billing']
+      ['f_email', 'f_password', 'f_lport', 'f_mday', 'f_pname', 'f_uname', 'f_dname', 'f_outletName', 'f_pluginName', 'f_polling', 'f_billing']
         .forEach((id) => $(id).addEventListener('input', sync));
       ['f_email', 'f_password'].forEach((id) => $(id).addEventListener('input', refresh)); // 경고 실시간 갱신
-      ['f_power', 'f_usage', 'f_outlet', 'f_local'].forEach((id) =>
+      ['f_power', 'f_usage', 'f_daily', 'f_outlet', 'f_local'].forEach((id) =>
         $(id).addEventListener('change', () => { refresh(); sync(); }));
 
       // 로드 직후 1회 스테이징 — 사용자가 아무 것도 안 건드리고 저장만 눌러도
