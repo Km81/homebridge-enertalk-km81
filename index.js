@@ -580,12 +580,27 @@ class EnerTalkPlatform {
     const ctx = this.localCtx;
     if (!ctx) return;
 
-    // 다중 EnerTalk 미터 오염 방지: 첫 기기에 락온하고 다른 기기 프레임은 무시(#4)
+    // 다중 EnerTalk 미터 오염 방지 + 재접속 견고성(#4):
+    //  같은 기기라도 재접속(세션 리셋) 시 deviceId 뒷바이트가 바뀐다(앞 7바이트는 동일 관측).
+    //  첫 기기에 락온하되, 다른 deviceId 프레임이 와도 —
+    //   (A) 락온 기기가 stale(무수신 임계 초과)이면 = 재접속으로 보고 재락온
+    //   (B) 앞 7바이트(안정 프리픽스)가 같으면 = 같은 기기의 세션 변화로 보고 재락온
+    //  둘 다 아니면(락온 기기가 살아있는데 프리픽스도 다른) 진짜 다른 미터 → 무시.
     if (r.deviceId) {
-      if (!ctx.deviceId) ctx.deviceId = r.deviceId;
-      else if (ctx.deviceId !== r.deviceId) {
-        if (!ctx._warnedMultiDev) { this.log.warn(`[EnerTalk][local] 다른 기기(${r.deviceId}) 프레임 무시 — 락온: ${ctx.deviceId}`); ctx._warnedMultiDev = true; }
-        return;
+      if (!ctx.deviceId) {
+        ctx.deviceId = r.deviceId;
+      } else if (ctx.deviceId !== r.deviceId) {
+        const samePrefix = ctx.deviceId.slice(0, 14) === r.deviceId.slice(0, 14); // 앞 7바이트(=14 hex)
+        const staleMs = Math.max(60, this.pollingInterval * 4) * 1000;
+        const lockedStale = Date.now() - ctx.lastLocalMs > staleMs;
+        if (samePrefix || lockedStale) {
+          this.log.info(`[EnerTalk][local] 기기 재접속 감지 — deviceId ${ctx.deviceId} → ${r.deviceId} 재락온(${samePrefix ? '동일 프리픽스' : 'stale'}).`);
+          ctx.deviceId = r.deviceId;
+          ctx._warnedMultiDev = false;
+        } else {
+          if (!ctx._warnedMultiDev) { this.log.warn(`[EnerTalk][local] 다른 기기(${r.deviceId}) 프레임 무시 — 락온: ${ctx.deviceId}`); ctx._warnedMultiDev = true; }
+          return;
+        }
       }
     }
 
