@@ -49,9 +49,10 @@ class EnerTalkPlatform {
     this.pollingInterval = Math.max(10, Number(this.config.pollingInterval) || 30);  // 초, 실시간
     this.billingInterval = Math.max(60, Number(this.config.billingInterval) || 300); // 초, 당월 누적
 
-    // 노출 토글 (기본: 실시간·당월 on, 콘센트 off)
+    // 노출 토글 (기본: 실시간·당월·오늘 on, 콘센트 off)
     this.exposePower = this.config.exposePower !== false;
     this.exposeUsage = this.config.exposeUsage !== false;
+    this.exposeDaily = this.config.exposeDaily !== false;
     this.exposeOutlet = this.config.exposeOutlet === true;
 
     // 로컬 모드: 기기를 클라우드 대신 이 호스트로 직접 받음(DNS 리다이렉트 필요).
@@ -190,9 +191,11 @@ class EnerTalkPlatform {
 
     const powerName = this.config.powerSensorName || '실시간 전력';
     const usageName = this.config.usageSensorName || '당월 사용량';
+    const dailyName = this.config.dailySensorName || '오늘 사용량';
 
     let powerLux = null;
     let usageLux = null;
+    let dailyLux = null;
     let outlet = null;
     let history = null;
 
@@ -229,6 +232,18 @@ class EnerTalkPlatform {
       this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
     }
 
+    // ── 2-1) 오늘 사용량 센서 (조도센서 lux=kWh + Eve kWh) ─────────────
+    if (this.exposeDaily) {
+      const dUuid = uuidGen(`${PLUGIN_NAME}:${site.id}:daily`);
+      seen.add(dUuid);
+      const dAcc = this._ensureAccessory(dUuid, dailyName, toRegister);
+      dAcc.context.siteId = site.id;
+      this._setInfo(dAcc, site, 'EnerTalk 오늘 사용량(kWh)');
+      dailyLux = dAcc.getService(Service.LightSensor) || dAcc.addService(Service.LightSensor, dailyName);
+      dailyLux.setCharacteristic(Characteristic.Name, dailyName);
+      this._ensureCharacteristic(dailyLux, this.Eve.TotalConsumption);
+    }
+
     // ── 3) 옵션: Eve 에너지 그래프용 Outlet(+스위치) ──────────────────
     if (this.exposeOutlet) {
       const outletName = this.config.outletName || site.name || '소비전력';
@@ -253,11 +268,11 @@ class EnerTalkPlatform {
 
     // ── 폴링 (필요한 것만) ─────────────────────────────────────────
     this._stopTimers(site.id);
-    const ctx = { site, powerLux, usageLux, outlet, history, timers: [], loggedRealtime: false, loggedBilling: false };
+    const ctx = { site, powerLux, usageLux, dailyLux, outlet, history, timers: [], loggedRealtime: false, loggedBilling: false };
     this.contexts.set(site.id, ctx);
 
     const needRealtime = !!(powerLux || outlet);
-    const needBilling = !!(usageLux || outlet);
+    const needBilling = !!(usageLux || dailyLux || outlet);
 
     const pollRealtime = () => this._pollRealtime(site.id).catch((e) =>
       this.log.warn('[EnerTalk] realtime 폴링 오류:', e.message));
@@ -411,7 +426,7 @@ class EnerTalkPlatform {
       c._stale = true;
       this.log.warn(`[EnerTalk][local] 기기 무수신 ${Math.round((Date.now() - c.lastLocalMs) / 1000)}초 — 액세서리를 응답없음으로 표시(기기 전원/네트워크 확인).`);
       const err = new Error('EnerTalk device not responding');
-      for (const svc of [c.powerLux, c.usageLux]) {
+      for (const svc of [c.powerLux, c.usageLux, c.dailyLux]) {
         if (!svc) continue;
         try { svc.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(err); } catch (e) { /* 무시 */ }
       }
@@ -438,7 +453,15 @@ class EnerTalkPlatform {
       this.monthly.backfillDaily(entries, todayStr);
       // 클라우드 모드(기기 카운터 없음)용 오늘(현재까지) 값 — 로컬 모드에선 카운터 산출이 우선.
       const t = entries.find((e) => e.date === todayStr);
-      if (t) this.monthly.setCloudCurrent(null, t.kwh);
+      if (t) {
+        this.monthly.setCloudCurrent(null, t.kwh);
+        // 클라우드 모드 '오늘 사용량' 액세서리 갱신(부팅 1회 + 12시간). 로컬 모드는 프레임마다 갱신.
+        const ctx = this.contexts.get(sid);
+        if (ctx && ctx.dailyLux) {
+          ctx.dailyLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(t.kwh));
+          ctx.dailyLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(t.kwh, 3));
+        }
+      }
     }
 
     const monp = await this.client.getPeriodic(sid, 'month', now - 400 * 86400000, now).catch(() => null);
@@ -465,11 +488,13 @@ class EnerTalkPlatform {
     const uuidGen = this.api.hap.uuid.generate;
     const powerName = this.config.powerSensorName || '실시간 전력';
     const usageName = this.config.usageSensorName || '당월 사용량';
+    const dailyName = this.config.dailySensorName || '오늘 사용량';
 
     const seen = new Set();
     const toRegister = [];
     let powerLux = null;
     let usageLux = null;
+    let dailyLux = null;
     let history = null;
 
     if (this.exposePower) {
@@ -503,6 +528,17 @@ class EnerTalkPlatform {
       this._ensureCharacteristic(usageLux, this.Eve.TotalConsumption);
     }
 
+    if (this.exposeDaily) {
+      const dUuid = uuidGen(`${PLUGIN_NAME}:${siteId}:daily`);
+      seen.add(dUuid);
+      const dAcc = this._ensureAccessory(dUuid, dailyName, toRegister);
+      dAcc.context.siteId = siteId;
+      this._setInfo(dAcc, { id: siteId }, 'EnerTalk 오늘 사용량(kWh)');
+      dailyLux = dAcc.getService(Service.LightSensor) || dAcc.addService(Service.LightSensor, dailyName);
+      dailyLux.setCharacteristic(Characteristic.Name, dailyName);
+      this._ensureCharacteristic(dailyLux, this.Eve.TotalConsumption);
+    }
+
     if (toRegister.length) {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toRegister);
     }
@@ -516,7 +552,7 @@ class EnerTalkPlatform {
     }
 
     this.localCtx = {
-      powerLux, usageLux, history,
+      powerLux, usageLux, dailyLux, history,
       timers: [],
       loggedRealtime: false, loggedMonthly: false,
       deviceId: null,        // 락온한 기기 식별자(다중 기기 오염 방지)
@@ -539,6 +575,15 @@ class EnerTalkPlatform {
     // 기준선을 로컬에서 확정(오늘 자정 카운터 기준). 이미 이 주기에 확정돼 있으면 그대로 유지.
     this.monthly.ensureLocalBaseline(ctx.lastCounter_mWh, now);
 
+    // 오늘 사용량(당일 자정~현재) — 기기 카운터로 로컬 산출.
+    if (ctx.dailyLux) {
+      const today = this.monthly.todayKwh(ctx.lastCounter_mWh, now);
+      if (today != null) {
+        ctx.dailyLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(today));
+        ctx.dailyLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(today, 3));
+      }
+    }
+
     const kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, now);
     if (kwh == null) return;
     if (ctx.usageLux) {
@@ -546,7 +591,7 @@ class EnerTalkPlatform {
       ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
     }
     if (!ctx.loggedMonthly) {
-      this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh (로컬 산출) — 정상 (이후 갱신은 debug 로그)`);
+      this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh · 오늘 ${round(this.monthly.todayKwh(ctx.lastCounter_mWh, now) || 0, 2)}kWh (로컬 산출) — 정상 (이후 갱신은 debug 로그)`);
       ctx.loggedMonthly = true;
     }
   }

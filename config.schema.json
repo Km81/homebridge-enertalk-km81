@@ -72,6 +72,18 @@
         "default": "당월 사용량",
         "condition": { "functionBody": "return model.exposeUsage !== false;" }
       },
+      "exposeDaily": {
+        "title": "오늘 사용량 액세서리 추가",
+        "type": "boolean",
+        "default": true,
+        "description": "오늘(당일 자정~현재) 누적(kWh)을 조도센서 액세서리로 노출. 매일 자정 0부터 재적산."
+      },
+      "dailySensorName": {
+        "title": "오늘 사용량 센서 이름",
+        "type": "string",
+        "default": "오늘 사용량",
+        "condition": { "functionBody": "return model.exposeDaily !== false;" }
+      },
       "pollingInterval": {
         "title": "실시간 폴링 주기(초)",
         "type": "integer",
