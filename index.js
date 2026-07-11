@@ -660,6 +660,24 @@ class EnerTalkPlatform {
     }
     this._applyRealtime(watts, volts, amps);
 
+    // v1.13.0 — HA 파일 브릿지: 실시간 값을 storageDir의 enertalk-live.json으로 노출.
+    // Home Assistant가 홈브릿지 폴더 ro 마운트로 이 파일을 읽어 실시간 전력 센서를 만든다.
+    // (2026-07-08 핫패치로 운영 검증된 코드를 정식 기능으로 승격 — 이제 npm 업데이트에도 유지됨.)
+    // tmp→rename 원자적 교체(반쪽 읽기 방지), 실패는 전부 무시 — HomeKit 경로에 영향 없음.
+    try {
+      const _fs = require('fs'), _p = require('path');
+      const _lp = _p.join(this._storageDir || '.', 'enertalk-live.json');
+      const _live = JSON.stringify({
+        power_w: Number.isFinite(watts) ? Math.round(watts) : null,
+        voltage_v: Number.isFinite(volts) ? Math.round(volts * 10) / 10 : null,
+        current_a: Number.isFinite(amps) ? Math.round(amps * 100) / 100 : null,
+        energy_kwh: (r.energy_mWh != null && r.energy_mWh >= 0 && r.energy_mWh < 1e13) ? Math.round(r.energy_mWh / 1e4) / 100 : null,
+        wrote_at: Date.now()
+      });
+      _fs.writeFileSync(_lp + '.tmp', _live);
+      _fs.renameSync(_lp + '.tmp', _lp);
+    } catch (e) { /* 무시 */ }
+
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(완전 로컬, 클라우드 미사용).
     // 손상 프레임(음수/비현실적 거대값)은 당월·일별 오염을 막기 위해 카운터 반영을 건너뛴다
     // (실시간 W/V/A 는 위에서 이미 반영됨). 정상 프레임에서 자동 회복.
