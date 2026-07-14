@@ -274,10 +274,19 @@ class EnerTalkPlatform {
     const needRealtime = !!(powerLux || outlet);
     const needBilling = !!(usageLux || dailyLux || outlet);
 
-    const pollRealtime = () => this._pollRealtime(site.id).catch((e) =>
-      this.log.warn('[EnerTalk] realtime 폴링 오류:', e.message));
-    const pollBilling = () => this._pollBilling(site.id).catch((e) =>
-      this.log.warn('[EnerTalk] billing 폴링 오류:', e.message));
+    // 폴링 오류는 첫 회 + 10회마다 warn, 나머지는 debug (반복 억제) — 복구 시 _poll* 성공부에서 info 1회 (v2.0.0)
+    const pollRealtime = () => this._pollRealtime(site.id).catch((e) => {
+      ctx.realtimeFailStreak = (ctx.realtimeFailStreak || 0) + 1;
+      const m = `[EnerTalk] realtime 폴링 오류 x${ctx.realtimeFailStreak}: ${e.message}`;
+      if (ctx.realtimeFailStreak === 1 || ctx.realtimeFailStreak % 10 === 0) this.log.warn(m);
+      else this.log.debug(m);
+    });
+    const pollBilling = () => this._pollBilling(site.id).catch((e) => {
+      ctx.billingFailStreak = (ctx.billingFailStreak || 0) + 1;
+      const m = `[EnerTalk] billing 폴링 오류 x${ctx.billingFailStreak}: ${e.message}`;
+      if (ctx.billingFailStreak === 1 || ctx.billingFailStreak % 10 === 0) this.log.warn(m);
+      else this.log.debug(m);
+    });
 
     if (needRealtime) {
       pollRealtime();
@@ -301,6 +310,10 @@ class EnerTalkPlatform {
     const ctx = this.contexts.get(siteId);
     if (!ctx) return;
     const data = await this.client.getRealtime(ctx.site.id);
+    if (ctx.realtimeFailStreak) {
+      this.log.info(`[EnerTalk] realtime 폴링 복구 — ${ctx.realtimeFailStreak}회 실패 후 정상 재개`);
+      ctx.realtimeFailStreak = 0;
+    }
 
     const watts = clamp0(EnerTalkApi.toWatts(data.activePower));
     const volts = clamp0(EnerTalkApi.toVolts(data.voltage));
@@ -331,6 +344,10 @@ class EnerTalkPlatform {
     const ctx = this.contexts.get(siteId);
     if (!ctx) return;
     const data = await this.client.getBilling(ctx.site.id);
+    if (ctx.billingFailStreak) {
+      this.log.info(`[EnerTalk] billing 폴링 복구 — ${ctx.billingFailStreak}회 실패 후 정상 재개`);
+      ctx.billingFailStreak = 0;
+    }
 
     const kwh = EnerTalkApi.toKwh(data.usage);
     if (Number.isFinite(kwh)) {
@@ -676,7 +693,17 @@ class EnerTalkPlatform {
       });
       _fs.writeFileSync(_lp + '.tmp', _live);
       _fs.renameSync(_lp + '.tmp', _lp);
-    } catch (e) { /* 무시 */ }
+      if (ctx._liveWriteFail) { // 쓰기 실패 상태에서 복구 — HA 실시간 센서 재개 알림 (v2.0.0)
+        ctx._liveWriteFail = false;
+        this.log.info('[EnerTalk][local] HA 라이브 파일 쓰기 복구 — 실시간 센서 재개.');
+      }
+    } catch (e) {
+      // 초당 push라 1회만 warn (반복 억제) — HomeKit 경로에는 영향 없음
+      if (!ctx._liveWriteFail) {
+        ctx._liveWriteFail = true;
+        this.log.warn(`[EnerTalk][local] HA 라이브 파일 쓰기 실패(반복 억제, 복구 시 알림): ${e.message}`);
+      }
+    }
 
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(완전 로컬, 클라우드 미사용).
     // 손상 프레임(음수/비현실적 거대값)은 당월·일별 오염을 막기 위해 카운터 반영을 건너뛴다
