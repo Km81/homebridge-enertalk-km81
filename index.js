@@ -124,7 +124,7 @@ class EnerTalkPlatform {
       this.log.error('[EnerTalk] 연결된 site 가 없습니다.');
       return;
     }
-    this.log.info(`[EnerTalk] 로그인 성공 · site ${sites.length}개`);
+    this.log.info(`[EnerTalk] 로그인됨 (site ${sites.length}개)`);
 
     const seen = new Set();
     const toRegister = [];
