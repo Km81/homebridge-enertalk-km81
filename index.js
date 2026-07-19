@@ -92,6 +92,8 @@ class EnerTalkPlatform {
         if (this._backfillTimer) { clearInterval(this._backfillTimer); this._backfillTimer = null; }
         this._stopAllTimers();
         if (this.localServer) { try { this.localServer.stop(); } catch (e) { /* 무시 */ } }
+        // v2.1.0 — 종료 직전 당월 상태 플러시(60초 throttle 창의 낡음 제거)
+        if (this.monthly) { try { this.monthly._save(); } catch (e) { /* 무시 */ } }
       });
     }
   }
@@ -424,7 +426,16 @@ class EnerTalkPlatform {
       this.log.error(`[EnerTalk][local] 포트 ${this.localPort} 사용 중/열기 실패 — ${Math.round(delay / 1000)}초 후 재시도.`);
       this._localRetryTimer = setTimeout(() => this._startLocalServer(attempt + 1), delay);
     });
-    try { srv.start(); } catch (e) { this.log.error('[EnerTalk][local] TLS 서버 시작 예외:', e && e.message); }
+    try { srv.start(); } catch (e) {
+      // v2.1.0 — 동기 예외(인증서 생성 실패·TLS 옵션 거부 등)도 listen-error와 동일하게
+      // 백오프 재시도: 기존엔 로그 1줄 남기고 영구 사망(무경보)이던 갈래 (적대 리뷰 HIGH)
+      this.log.error('[EnerTalk][local] TLS 서버 시작 예외 — 재시도 예약:', e && e.message);
+      try { srv.stop(); } catch (_) { /* 무시 */ }
+      if (!this._stopped) {
+        const delay = Math.min(600, 15 * Math.pow(2, attempt)) * 1000;
+        this._localRetryTimer = setTimeout(() => this._startLocalServer(attempt + 1), delay);
+      }
+    }
   }
 
   /**
@@ -679,42 +690,74 @@ class EnerTalkPlatform {
 
     // v1.13.0 — HA 파일 브릿지: 실시간 값을 storageDir의 enertalk-live.json으로 노출.
     // Home Assistant가 홈브릿지 폴더 ro 마운트로 이 파일을 읽어 실시간 전력 센서를 만든다.
-    // (2026-07-08 핫패치로 운영 검증된 코드를 정식 기능으로 승격 — 이제 npm 업데이트에도 유지됨.)
-    // tmp→rename 원자적 교체(반쪽 읽기 방지), 실패는 전부 무시 — HomeKit 경로에 영향 없음.
-    try {
-      const _fs = require('fs'), _p = require('path');
+    // v2.1.0 — 스로틀(2초)+비동기+in-flight 가드: 프레임(1~2초)마다 동기 write+rename은
+    // 디스크 hang 시 홈브릿지 이벤트 루프 전체를 세우는 인질 구조였음(적대 리뷰 HIGH).
+    // HA 소비 주기상 2초 스로틀은 무손실. tmp→rename 원자 교체는 유지.
+    const _liveNow = Date.now();
+    if (!ctx._liveBusy && (!ctx._liveLastMs || _liveNow - ctx._liveLastMs >= 2000)) {
+      ctx._liveBusy = true;
+      ctx._liveLastMs = _liveNow;
+      const _p = require('path');
+      const _fsp = require('fs').promises;
       const _lp = _p.join(this._storageDir || '.', 'enertalk-live.json');
       const _live = JSON.stringify({
         power_w: Number.isFinite(watts) ? Math.round(watts) : null,
         voltage_v: Number.isFinite(volts) ? Math.round(volts * 10) / 10 : null,
         current_a: Number.isFinite(amps) ? Math.round(amps * 100) / 100 : null,
         energy_kwh: (r.energy_mWh != null && r.energy_mWh >= 0 && r.energy_mWh < 1e13) ? Math.round(r.energy_mWh / 1e4) / 100 : null,
-        wrote_at: Date.now()
+        wrote_at: _liveNow
       });
-      _fs.writeFileSync(_lp + '.tmp', _live);
-      _fs.renameSync(_lp + '.tmp', _lp);
-      if (ctx._liveWriteFail) { // 쓰기 실패 상태에서 복구 — HA 실시간 센서 재개 알림 (v2.0.0)
-        ctx._liveWriteFail = false;
-        this.log.info('[EnerTalk][local] HA 라이브 파일 쓰기 복구 — 실시간 센서 재개.');
-      }
-    } catch (e) {
-      // 초당 push라 1회만 warn (반복 억제) — HomeKit 경로에는 영향 없음
-      if (!ctx._liveWriteFail) {
-        ctx._liveWriteFail = true;
-        this.log.warn(`[EnerTalk][local] HA 라이브 파일 쓰기 실패(반복 억제, 복구 시 알림): ${e.message}`);
-      }
+      (async () => {
+        try {
+          await _fsp.writeFile(_lp + '.tmp', _live);
+          await _fsp.rename(_lp + '.tmp', _lp);
+          if (ctx._liveWriteFail) { // 쓰기 실패 상태에서 복구 — HA 실시간 센서 재개 알림 (v2.0.0)
+            ctx._liveWriteFail = false;
+            this.log.info('[EnerTalk][local] HA 라이브 파일 쓰기 복구 — 실시간 센서 재개.');
+          }
+        } catch (e) {
+          if (!ctx._liveWriteFail) { // 1회만 warn (반복 억제) — HomeKit 경로에는 영향 없음
+            ctx._liveWriteFail = true;
+            this.log.warn(`[EnerTalk][local] HA 라이브 파일 쓰기 실패(반복 억제, 복구 시 알림): ${e.message}`);
+          }
+        } finally {
+          ctx._liveBusy = false;   // 디스크가 멈춰 있으면 다음 쓰기 자체를 시도하지 않음(최신값만 유지)
+        }
+      })();
     }
 
     // 당월 사용량: 기기 누적 카운터로 로컬 산출(완전 로컬, 클라우드 미사용).
     // 손상 프레임(음수/비현실적 거대값)은 당월·일별 오염을 막기 위해 카운터 반영을 건너뛴다
     // (실시간 W/V/A 는 위에서 이미 반영됨). 정상 프레임에서 자동 회복.
     if (r.energy_mWh != null && r.energy_mWh >= 0 && r.energy_mWh < 1e13) {
-      ctx.lastCounter_mWh = r.energy_mWh;
-      if (this.monthly) {
-        this.monthly.recordCounter(r.energy_mWh, ctx.lastLocalMs); // 재시작 대비 영속(~60초 throttle)
-        this.monthly.recordDaily(r.energy_mWh, ctx.lastLocalMs);   // 일별 사용량 로컬 기록(KST 자정 경계)
+      // v2.1.0 — 전방 점프 가드(적대 리뷰): 프레임당 +50kWh 초과 점프는 글리치로 보고
+      // 누적 계열 반영만 보류(실시간 표시는 유지). 3프레임 연속 지속되면 실제 변화로 수용.
+      // 글리치 1프레임이 당월 재기준(partial)+히스토리 유실로 번지던 연쇄 차단. 타 기기
+      // 카운터 혼입(stale 재락온) 케이스도 이 가드에 같이 걸림.
+      const JUMP_mWh = 5e7;
+      let acceptCounter = true;
+      if (ctx.lastCounter_mWh != null && r.energy_mWh > ctx.lastCounter_mWh + JUMP_mWh) {
+        ctx._jumpStreak = (ctx._jumpStreak || 0) + 1;
+        if (ctx._jumpStreak >= 3) {
+          this.log.warn(`[EnerTalk][local] 카운터 급점프 3연속 — 실제 변화로 수용 (+${Math.round((r.energy_mWh - ctx.lastCounter_mWh) / 1e6)}kWh)`);
+          ctx._jumpStreak = 0;
+        } else {
+          acceptCounter = false;
+          if (ctx._jumpStreak === 1) {
+            this.log.warn(`[EnerTalk][local] 카운터 급점프 감지(+${Math.round((r.energy_mWh - ctx.lastCounter_mWh) / 1e6)}kWh) — 글리치 의심, 누적 반영 보류 (3연속 시 수용)`);
+          }
+        }
+      } else {
+        ctx._jumpStreak = 0;
       }
-      this._updateMonthlyUsage();
+      if (acceptCounter) {
+        ctx.lastCounter_mWh = r.energy_mWh;
+        if (this.monthly) {
+          this.monthly.recordCounter(r.energy_mWh, ctx.lastLocalMs); // 재시작 대비 영속(~60초 throttle)
+          this.monthly.recordDaily(r.energy_mWh, ctx.lastLocalMs);   // 일별 사용량 로컬 기록(KST 자정 경계)
+        }
+        this._updateMonthlyUsage();
+      }
     }
 
     const msg = `[EnerTalk][local] 실시간 ${round(watts, 1)}W / ${round(volts, 1)}V / ${round(amps, 2)}A / ${r.freqHz}Hz (기기 직수신)`;
