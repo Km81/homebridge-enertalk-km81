@@ -14,6 +14,8 @@
 
 'use strict';
 
+const path = require('path');
+const fsp = require('fs').promises;
 const packageJson = require('./package.json');
 const EnerTalkApi = require('./lib/EnerTalkApi.js');
 const LocalServer = require('./lib/LocalServer.js');
@@ -413,7 +415,9 @@ class EnerTalkPlatform {
   /** 로컬 TLS 서버 기동 + listen 실패 시 백오프 재시도. 성공 시 staleness 워치독 가동. */
   _startLocalServer(attempt) {
     if (this._stopped) return;
-    const srv = new LocalServer({ port: this.localPort, log: this.log });
+    // v2.1.1 — 인증서 플랫폼 캐시: 재시도마다 새 LocalServer가 RSA 키쌍을 재생성(실측 98~265ms
+    // 동기 블로킹)하던 것을 첫 생성분 재사용으로 제거 (효율 리뷰. 기기가 인증서를 검증 안 함)
+    const srv = new LocalServer({ port: this.localPort, log: this.log, cert: this._tlsCert, key: this._tlsKey });
     this.localServer = srv;
     srv.on('reading', (r) => {
       try { this._onLocalReading(r); } catch (e) { this.log.debug('[EnerTalk][local] reading 처리 오류:', e.message); }
@@ -426,7 +430,11 @@ class EnerTalkPlatform {
       this.log.error(`[EnerTalk][local] 포트 ${this.localPort} 사용 중/열기 실패 — ${Math.round(delay / 1000)}초 후 재시도.`);
       this._localRetryTimer = setTimeout(() => this._startLocalServer(attempt + 1), delay);
     });
-    try { srv.start(); } catch (e) {
+    try {
+      srv.start();
+      // 생성된 인증서를 플랫폼에 회수 — 다음 재시도/재기동 시 재사용
+      this._tlsCert = srv._cert; this._tlsKey = srv._key;
+    } catch (e) {
       // v2.1.0 — 동기 예외(인증서 생성 실패·TLS 옵션 거부 등)도 listen-error와 동일하게
       // 백오프 재시도: 기존엔 로그 1줄 남기고 영구 사망(무경보)이던 갈래 (적대 리뷰 HIGH)
       this.log.error('[EnerTalk][local] TLS 서버 시작 예외 — 재시도 예약:', e && e.message);
@@ -453,6 +461,7 @@ class EnerTalkPlatform {
       if (Date.now() - c.lastLocalMs <= staleMs) return;
       c._stale = true;
       this.log.warn(`[EnerTalk][local] 기기 무수신 ${Math.round((Date.now() - c.lastLocalMs) / 1000)}초 — 액세서리를 응답없음으로 표시(기기 전원/네트워크 확인).`);
+      c._lastPush = {};   // v2.1.1 — 무변화 게이트 캐시 초기화: 복귀 시 같은 값이라도 반드시 재push돼 Error 해제
       const err = new Error('EnerTalk device not responding');
       for (const svc of [c.powerLux, c.usageLux, c.dailyLux]) {
         if (!svc) continue;
@@ -587,7 +596,8 @@ class EnerTalkPlatform {
       lastLocalMs: Date.now(), // 마지막 로컬 수신 시각(부팅 직후 쓰레기 로그 방지 #17)
       started: false,        // 첫 로컬 수신 로그를 한 번만 남기기 위한 플래그
       _stale: false,         // staleness 워치독이 'No Response' 표시 중인지
-      // 기기 누적 카운터 — 영속값으로 seed(재시작 직후에도 로컬 산출 즉시 복귀)
+      // 기기 누적 카운터 — 영속값으로 seed. 실사용처 = 재시작 직후 첫 프레임의 전방 점프
+      // 가드 기준선(v2.1.0). 산출 자체는 첫 유효 프레임 도착 시점부터.
       lastCounter_mWh: (this.monthly && this.monthly.lastCounter()) || null,
       lastHistoryMs: 0,      // fakegato 히스토리 마지막 기록 시각(throttle)
     };
@@ -607,16 +617,16 @@ class EnerTalkPlatform {
     if (ctx.dailyLux) {
       const today = this.monthly.todayKwh(ctx.lastCounter_mWh, now);
       if (today != null) {
-        ctx.dailyLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(today));
-        ctx.dailyLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(today, 3));
+        this._pushIfChanged(ctx, 'd.lux', ctx.dailyLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel), clampLux(today));
+        this._pushIfChanged(ctx, 'd.kwh', ctx.dailyLux.getCharacteristic(this.Eve.TotalConsumption), round(today, 3));
       }
     }
 
     const kwh = this.monthly.localMonthlyKwh(ctx.lastCounter_mWh, now);
     if (kwh == null) return;
     if (ctx.usageLux) {
-      ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(kwh));
-      ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption).updateValue(round(kwh, 3));
+      this._pushIfChanged(ctx, 'm.lux', ctx.usageLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel), clampLux(kwh));
+      this._pushIfChanged(ctx, 'm.kwh', ctx.usageLux.getCharacteristic(this.Eve.TotalConsumption), round(kwh, 3));
     }
     if (!ctx.loggedMonthly) {
       this.log.info(`[EnerTalk][local] 당월 ${round(kwh, 2)}kWh · 오늘 ${round(this.monthly.todayKwh(ctx.lastCounter_mWh, now) || 0, 2)}kWh (로컬 산출) — 정상 (이후 갱신은 debug 로그)`);
@@ -629,16 +639,25 @@ class EnerTalkPlatform {
    * 유효 숫자가 아닌 값(NaN/누락)은 갱신을 건너뛰어 직전 값을 유지(허위 0 기록 방지 #3).
    * 음수 전력(역송)은 표시상 0 으로 클램프(Eve minValue:0 위반 방지 #26).
    */
+  // v2.1.1 — 무변화 push 게이트: 같은 값이면 updateValue 생략 (초당 프레임 × 특성 4~8개의
+  // 불필요 HAP 이벤트 절감. 전압 0.1V·전류 0.01A·kWh는 상당 비율 무변화)
+  _pushIfChanged(ctx, key, char, value) {
+    const cache = ctx._lastPush || (ctx._lastPush = {});
+    if (cache[key] === value) return;
+    cache[key] = value;
+    char.updateValue(value);
+  }
+
   _applyRealtime(watts, volts, amps) {
     const ctx = this.localCtx;
     if (!ctx || !ctx.powerLux) return;
     const P = clamp0(watts);
     if (Number.isFinite(P)) {
-      ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel).updateValue(clampLux(P));
-      ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption).updateValue(round(P, 1));
+      this._pushIfChanged(ctx, 'p.lux', ctx.powerLux.getCharacteristic(this.hap.Characteristic.CurrentAmbientLightLevel), clampLux(P));
+      this._pushIfChanged(ctx, 'p.w', ctx.powerLux.getCharacteristic(this.Eve.CurrentConsumption), round(P, 1));
     }
-    if (Number.isFinite(volts)) ctx.powerLux.getCharacteristic(this.Eve.Voltage).updateValue(round(clamp0(volts), 1));
-    if (Number.isFinite(amps)) ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent).updateValue(round(clamp0(amps), 2));
+    if (Number.isFinite(volts)) this._pushIfChanged(ctx, 'p.v', ctx.powerLux.getCharacteristic(this.Eve.Voltage), round(clamp0(volts), 1));
+    if (Number.isFinite(amps)) this._pushIfChanged(ctx, 'p.a', ctx.powerLux.getCharacteristic(this.Eve.ElectricCurrent), round(clamp0(amps), 2));
     // fakegato 히스토리는 ~30초 간격으로만 기록(기기가 초당 푸시 → 매초 기록은 낭비).
     if (ctx.history && Number.isFinite(P)) {
       const now = Date.now();
@@ -697,9 +716,9 @@ class EnerTalkPlatform {
     if (!ctx._liveBusy && (!ctx._liveLastMs || _liveNow - ctx._liveLastMs >= 2000)) {
       ctx._liveBusy = true;
       ctx._liveLastMs = _liveNow;
-      const _p = require('path');
-      const _fsp = require('fs').promises;
-      const _lp = _p.join(this._storageDir || '.', 'enertalk-live.json');
+      // v2.1.1 — 경로 1회 계산 캐시 + 모듈 상단 require (hot path 위생)
+      const _lp = ctx._livePath || (ctx._livePath = path.join(this._storageDir || '.', 'enertalk-live.json'));
+      const _fsp = fsp;
       const _live = JSON.stringify({
         power_w: Number.isFinite(watts) ? Math.round(watts) : null,
         voltage_v: Number.isFinite(volts) ? Math.round(volts * 10) / 10 : null,
